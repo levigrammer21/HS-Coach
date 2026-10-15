@@ -1,0 +1,17 @@
+{
+  "name": "hs-football",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests.mjs",
+    "check": "node --check app.js && node --check engine.js && node --check cloud.js && node --test tests.mjs && node test-ui.mjs",
+    "test:ui": "node test-ui.mjs"
+  },
+  "devDependencies": {
+    "happy-dom": "21.0.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

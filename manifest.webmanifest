@@ -1,0 +1,17 @@
+{
+  "name": "HS Football — Friday Night",
+  "short_name": "HS Football",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c1820",
+  "theme_color": "#0c1820",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

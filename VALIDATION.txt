@@ -1,0 +1,37 @@
+npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+
+> hs-football@1.0.0 check
+> node --check app.js && node --check engine.js && node --check cloud.js && node --test tests.mjs && node test-ui.mjs
+
+✔ all eight official rosters have depth, unique identities and valid ratings (6.684054ms)
+✔ default installs are legal and include all offensive concepts (4.310937ms)
+✔ formation validator flags backs, covered receivers, numbering, motion and neutral zone (1.495662ms)
+✔ weighted defense excludes zeros, normalizes, respects eligibility and has safe fallback (25.71917ms)
+✔ seeded simulation is exactly replayable and does not mutate the play or roster (183.983806ms)
+✔ all 22 players occupy finite continuously sampled replay positions (144.771448ms)
+✔ running assignments, pullers, options and custom routes affect real trajectories (106.068932ms)
+✔ fit scores use roster and book, never mutate simulation inputs (28.426307ms)
+✔ downs, first downs, possession changes, incomplete passes and inbounds clock (3.196739ms)
+✔ touchdown requires a try, conversion and kickoff before the next drive (1.69487ms)
+✔ safeties, intercepted returns, fumbles and missed field goals change possessions (3.27429ms)
+✔ penalties repeat down, apply half-distance and grounding loss of down (1.450317ms)
+✔ timeouts and halftime restore appropriate clock state and kick recipient (1.414181ms)
+✔ paired overtime gives both sides a possession before deciding winner (1.849303ms)
+✔ special teams produce seeded physical flight and 22-player frames (12.85764ms)
+✔ full regulation games complete legally across all eight teams (11084.588664ms)
+✔ ten-week schedule, playoffs, history, graduation and incoming class preserve program (4257.626567ms)
+✔ friend game join locks two coaches, permits same official school, and sets correct kicker turn (4.953049ms)
+✔ turn transaction rejects stale sequence, wrong coach, changed rosters and changed defense (18.195107ms)
+✔ defensive overtime interception ends possession without a return score (2.070266ms)
+✔ kick return touchdown awards receiving team six points and a try (0.918547ms)
+✔ schedule customization preserves eight unique schools and locked completed weeks (4.979495ms)
+✔ clock spike counts as an incomplete pass attempt (23.155188ms)
+ℹ tests 23
+ℹ suites 0
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 16198.216677
+PASS: UI transitions, play and defense editing, franchise creation, rating edits, worker snap, film, persistence.
