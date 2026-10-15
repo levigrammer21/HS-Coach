@@ -1,0 +1,22 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    match /hsfUsers/{userId} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+    // Private friends game: participants may update their shared match state.
+    // This deliberately does not provide ranked or tamper-resistant arbitration.
+    match /hsfMatches/{code} {
+      allow create: if signedIn() && request.resource.data.host == request.auth.uid;
+      allow read: if signedIn(); // invite codes are shared by players
+      allow update: if signedIn() && (
+        resource.data.host == request.auth.uid ||
+        resource.data.guest == request.auth.uid ||
+        (resource.data.guest == null && request.resource.data.guest == request.auth.uid &&
+         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['guest','teams','guestDefense']))
+      );
+      allow delete: if signedIn() && resource.data.host == request.auth.uid;
+    }
+  }
+}
