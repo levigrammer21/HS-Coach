@@ -1,37 +1,118 @@
-npm warn Unknown env config "http-proxy". This will stop working in the next major version of npm.
+HS FOOTBALL 1.2.0 — FINAL AUTOMATED VALIDATION
 
-> hs-football@1.0.0 check
+Phone browser FPS, real provider sign-in and a live two-device match were not verified. See IMPLEMENTATION.md.
+
+Engine and interface
+
+> hs-football@1.2.0 check
 > node --check app.js && node --check engine.js && node --check cloud.js && node --test tests.mjs && node test-ui.mjs
 
-✔ all eight official rosters have depth, unique identities and valid ratings (6.684054ms)
-✔ default installs are legal and include all offensive concepts (4.310937ms)
-✔ formation validator flags backs, covered receivers, numbering, motion and neutral zone (1.495662ms)
-✔ weighted defense excludes zeros, normalizes, respects eligibility and has safe fallback (25.71917ms)
-✔ seeded simulation is exactly replayable and does not mutate the play or roster (183.983806ms)
-✔ all 22 players occupy finite continuously sampled replay positions (144.771448ms)
-✔ running assignments, pullers, options and custom routes affect real trajectories (106.068932ms)
-✔ fit scores use roster and book, never mutate simulation inputs (28.426307ms)
-✔ downs, first downs, possession changes, incomplete passes and inbounds clock (3.196739ms)
-✔ touchdown requires a try, conversion and kickoff before the next drive (1.69487ms)
-✔ safeties, intercepted returns, fumbles and missed field goals change possessions (3.27429ms)
-✔ penalties repeat down, apply half-distance and grounding loss of down (1.450317ms)
-✔ timeouts and halftime restore appropriate clock state and kick recipient (1.414181ms)
-✔ paired overtime gives both sides a possession before deciding winner (1.849303ms)
-✔ special teams produce seeded physical flight and 22-player frames (12.85764ms)
-✔ full regulation games complete legally across all eight teams (11084.588664ms)
-✔ ten-week schedule, playoffs, history, graduation and incoming class preserve program (4257.626567ms)
-✔ friend game join locks two coaches, permits same official school, and sets correct kicker turn (4.953049ms)
-✔ turn transaction rejects stale sequence, wrong coach, changed rosters and changed defense (18.195107ms)
-✔ defensive overtime interception ends possession without a return score (2.070266ms)
-✔ kick return touchdown awards receiving team six points and a try (0.918547ms)
-✔ schedule customization preserves eight unique schools and locked completed weeks (4.979495ms)
-✔ clock spike counts as an incomplete pass attempt (23.155188ms)
-ℹ tests 23
+✔ all eight official rosters have depth, unique identities and valid ratings (3.039195ms)
+✔ default installs are legal and include all offensive concepts (3.220372ms)
+✔ formation validator flags backs, covered receivers, numbering, motion and neutral zone (0.46852ms)
+✔ weighted defense excludes zeros, normalizes, respects eligibility and has safe fallback (11.823641ms)
+✔ seeded simulation is exactly replayable and does not mutate the play or roster (80.303622ms)
+✔ all 22 players occupy finite continuously sampled replay positions (169.62681ms)
+✔ running assignments, pullers, options and custom routes affect real trajectories (83.562882ms)
+✔ fit scores use roster and book, never mutate simulation inputs (17.681136ms)
+✔ downs, first downs, possession changes, incomplete passes and inbounds clock (5.078088ms)
+✔ touchdown requires a try, conversion and kickoff before the next drive (4.106277ms)
+✔ safeties, intercepted returns, fumbles and missed field goals change possessions (2.142886ms)
+✔ penalties repeat down, apply half-distance and grounding loss of down (1.760513ms)
+✔ timeouts and halftime restore appropriate clock state and kick recipient (1.301586ms)
+✔ paired overtime gives both sides a possession before deciding winner (1.558425ms)
+✔ special teams produce seeded physical flight and 22-player frames (19.275224ms)
+✔ full regulation games complete legally across all eight teams (8605.458337ms)
+✔ ten-week schedule, playoffs, history, graduation and incoming class preserve program (3727.956758ms)
+✔ friend game join locks two coaches, permits same official school, and sets correct kicker turn (3.508883ms)
+✔ turn transaction rejects stale sequence, wrong coach, changed rosters and changed defense (8.995706ms)
+✔ defensive overtime interception ends possession without a return score (1.436203ms)
+✔ kick return touchdown awards receiving team six points and a try (0.896919ms)
+✔ schedule customization preserves eight unique schools and locked completed weeks (3.499088ms)
+✔ clock spike counts as an incomplete pass attempt (17.129195ms)
+✔ play art includes distinct routes, run arrows, blocking bars, motion and progression numbers (0.687582ms)
+✔ all formation templates preserve eleven athletes and legal alignments (1.181118ms)
+✔ motion and shifts are animated before snap; live simulation begins at the rendered endpoint (35.070595ms)
+✔ man coverage follows motion using the observed target path (17.344472ms)
+✔ Cover 3 has three deep defenders; Cover 2 two; Cover 1 one (0.231842ms)
+✔ front templates actually move defenders and change pressure responsibilities (0.456262ms)
+✔ conditional rules evaluate live leverage and time and affect quarterback trace (22.95706ms)
+✔ rounded route transitions insert intermediate physical waypoints (0.232762ms)
+✔ post-whistle replay contains a fall, ground and recovery sequence without charging game clock (21.547407ms)
+✔ explicit depth chart selects the starter and fatigue rotates a reserve (4.320999ms)
+✔ compressed profile/replay encoding is exact and legacy JSON still decodes (54.948074ms)
+✔ accepted defensive foul at zero permits an untimed down before the period ends (2.199988ms)
+✔ simulated franchise games contribute season and career stats and program game records (265.684475ms)
+✔ class turnover replaces graduated positions and archives their career records (5.3081ms)
+✔ Firestore wire data round-trips every nested playbook, route and score array without illegal nested arrays (3.030459ms)
+✔ untouched factory migration preserves custom installs and creates no duplicate play IDs (0.483802ms)
+✔ mesh drag routes cross inward rather than running outward (0.186074ms)
+✔ a period expiring during selected runoff does not simulate or count a fake snap (1.831345ms)
+✔ a lead blocker reaches engagement instead of remaining stuck forever at its final path point (16.498076ms)
+✔ feature running back is selected before an automatic fullback in I personnel (7.301754ms)
+✔ two-way depth choices reserve explicit athletes and never duplicate a player on the same unit (1.032319ms)
+✔ fan protection puts tackles on edges and guards on interior rushers (0.235787ms)
+✔ running lane decisions preserve lateral and counter tracks (0.409703ms)
+✔ coverage follows observed geometry rather than a receiver's hidden future path (0.209538ms)
+✔ triple option pitches a live ball with an airborne carrier-free interval (19.038274ms)
+✔ a contain edge can force the option give rather than the keep (19.478682ms)
+✔ special teams select 22 distinct athletes and preserve seeded film (9.590422ms)
+✔ onside recoveries and punt touchbacks update possession without phantom downs (1.226084ms)
+✔ invalid special-teams calls are rejected at the rules boundary (0.498553ms)
+✔ a last-second winning touchdown ends without an unnecessary conversion (0.738066ms)
+✔ second overtime possession ends immediately on a winning touchdown (0.72772ms)
+✔ film notes cite actual exchanges and release events (18.406624ms)
+✔ formation switching restores personnel roles and flags a single forward motion segment (0.350415ms)
+✔ pursuit solves a meeting point without oscillating between the runner and an unreachable lead (0.242437ms)
+✔ deep defenders preserve shell depth over an underneath route (0.243479ms)
+✔ a quarterback may operate in his own end zone without an instant safety (17.625185ms)
+✔ short-field pre-snap defenders stay inside the end line (18.683662ms)
+✔ called running concepts never fall through into the passing progression (205.473157ms)
+✔ active athletes accumulate stamina-dependent fatigue while the bench recovers (3.7789ms)
+✔ two coaches choosing the same school have independent fatigue and roster IDs (1.921077ms)
+ℹ tests 63
 ℹ suites 0
-ℹ pass 23
+ℹ pass 63
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 16198.216677
-PASS: UI transitions, play and defense editing, franchise creation, rating edits, worker snap, film, persistence.
+ℹ duration_ms 13671.306282
+PASS: 58 UI transitions, touch routes, logic, formation/front libraries, named books, depth chart, schedule, scouting, stats, practice study, worker snap, film and persistence.
+
+Regulation, seasons and roster/concept study
+REGULATION {"home":"Red Creek","away":"Ironwood","score":[7,82],"snaps":206,"stats":[{"yards":162,"passing":45,"rushing":117,"turnovers":0},{"yards":673,"passing":669,"rushing":4,"turnovers":0}]}
+REGULATION {"home":"Eastview","away":"Summit Ridge","score":[61,41],"snaps":207,"stats":[{"yards":771,"passing":784,"rushing":-13,"turnovers":3},{"yards":415,"passing":320,"rushing":95,"turnovers":1}]}
+REGULATION {"home":"Pine Valley","away":"Stonebridge","score":[59,10],"snaps":179,"stats":[{"yards":574,"passing":416,"rushing":158,"turnovers":1},{"yards":236,"passing":77,"rushing":159,"turnovers":2}]}
+REGULATION {"home":"Ironwood","away":"Blackwater","score":[21,45],"snaps":187,"stats":[{"yards":371,"passing":414,"rushing":-43,"turnovers":5},{"yards":439,"passing":217,"rushing":222,"turnovers":1}]}
+REGULATION {"home":"Summit Ridge","away":"Westfield","score":[70,24],"snaps":232,"stats":[{"yards":648,"passing":180,"rushing":468,"turnovers":2},{"yards":519,"passing":552,"rushing":-33,"turnovers":5}]}
+REGULATION {"home":"Stonebridge","away":"Red Creek","score":[17,14],"snaps":184,"stats":[{"yards":226,"passing":141,"rushing":85,"turnovers":1},{"yards":301,"passing":141,"rushing":160,"turnovers":3}]}
+REGULATION {"home":"Blackwater","away":"Eastview","score":[38,51],"snaps":201,"stats":[{"yards":636,"passing":423,"rushing":213,"turnovers":4},{"yards":773,"passing":798,"rushing":-25,"turnovers":2}]}
+REGULATION {"home":"Westfield","away":"Pine Valley","score":[21,72],"snaps":220,"stats":[{"yards":459,"passing":464,"rushing":-5,"turnovers":2},{"yards":705,"passing":480,"rushing":225,"turnovers":2}]}
+SEASON {"year":2026,"champion":"Summit Ridge","records":10}
+SEASON {"year":2027,"champion":"Pine Valley","records":22}
+SEASON {"year":2028,"champion":"Pine Valley","records":34}
+PASS: 8 regulation matchups, 3 complete seasons and offseasons, 176 roster/concept checks. 44.0 seconds.
+
+Firebase emulator integration
+
+> hs-football@1.2.0 test:firebase
+> npx --yes firebase-tools@14.12.0 emulators:exec --only firestore --project demo-hs-football --config firebase-test.json "node test-firestore.mjs"
+
+i  emulators: Starting emulators: firestore
+i  emulators: Detected demo project ID "demo-hs-football", emulated services will use a demo configuration and attempts to access non-emulated services for this project will fail.
+i  firestore: Firestore Emulator logging to firestore-debug.log
+✔  firestore: Firestore Emulator UI websocket is running on 9150.
+i  Running script: node test-firestore.mjs
+Committed regulation turn 50
+Committed regulation turn 100
+Committed regulation turn 150
+Full regulation cloud game: 195 turns, 255038 bytes, score 84–28
+Regulation multiplayer game completed in 195 committed turns; serialized match 255038 bytes.
+PASS: 19 Firebase emulator integration checks (rules, two users, duplicate transactions, replay, locked data, profiles, completion and standings).
+✔  Script exited successfully (code 0)
+i  emulators: Shutting down emulators.
+i  firestore: Stopping Firestore Emulator
+i  hub: Stopping emulator hub
+i  logging: Stopping Logging Emulator
+

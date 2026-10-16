@@ -39,3 +39,12 @@ export function download(name, data) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
+export async function remove(key) {
+  const d = await db();
+  return new Promise((resolve, reject) => {
+    const t = d.transaction("data", "readwrite");
+    t.objectStore("data").delete(key);
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+}

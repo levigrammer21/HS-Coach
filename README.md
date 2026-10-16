@@ -1,8 +1,18 @@
 # HS Football — The Coach’s Box
 
-Fresh-source, mobile-first football coordinator game. No earlier HS Football code or assets were used.
+Fresh-source, mobile-first football coordinator game. Built on the approved fresh base; rejected earlier prototypes were not incorporated.
 
-**Read IMPLEMENTATION.md before treating this as the fully finished handoff specification.** This delivery contains a playable integrated game, but does not fully achieve every requested simulation, animation, rules, and multiplayer-verification requirement. No live deployment or authenticated Firebase acceptance test has been performed.
+**Version 1.2 extends the approved base without changing its visual direction.** Start with CHANGELOG.md for the new coaching tools, play art, franchise depth and multiplayer fixes. IMPLEMENTATION.md distinguishes implemented behavior, tests and remaining verification limits.
+
+Version 1.2 adds fan protection, sector-based coverage, receivers who stalk pursuit after a handoff, live option/toss pitches, dedicated special-team units, onside kicks, directional punts, fair catches, blocked kicks, improved endgame decisions, coach film notes, a phone Field View and recoverable designer drafts. It retains the approved field and athlete style. No competitive anti-cheat system is included.
+
+## Updating your existing copy
+
+1. Back up your current profile in Settings before uploading the upgrade.
+2. Replace the root files with this package’s files. The device database and Firebase namespace are unchanged.
+3. Merge the updated `match /hsFootballV1/app` rules into your current Firestore rules as described below. New friend games now use engine `hsf-1.2.0`.
+4. Close other game tabs/windows and reopen after uploading, so the new service worker can activate.
+5. Your local books and franchise remain. Unchanged factory installs receive corrections; custom installs are retained. Local games continue under the new engine; recorded films retain their stored positions. Start a new friend match for the new engine.
 
 ## Publish from your phone — no build required
 
@@ -14,7 +24,7 @@ Fresh-source, mobile-first football coordinator game. No earlier HS Football cod
 6. Local exhibitions, practice, the designer, film, and franchise work without Firebase sign-in. The first visit requires a connection; the service worker caches local game files afterward.
 7. For friend games, complete the Firebase steps below.
 
-There is no frontend build step, no runtime npm dependency, no Node server, and no API secret to enter. All game code is at the root. The only nested project file is GitHub’s optional automated-check workflow.
+There is no frontend build step, no runtime npm dependency, no Node server, and no API secret to enter. All game code is at the root. The only nested project file is GitHub’s automated-check workflow.
 
 ## Existing Firebase project
 
@@ -64,13 +74,13 @@ The current queries use a single array-contains filter for your matches and a si
 
 - **Home:** choose an official school and start or resume an exhibition.
 - **Gameday:** choose your call, set tempo or adjustments, snap, then watch. When the opponent has possession, “Watch opponent snap” runs its CPU-selected offense against your saved automatic defense. There is no joystick control.
-- **Playbook:** create or edit alignments, drag athletes, draw routes, choose route templates, assign blocks, draw motion or shifts, set delays/events and quarterback reads. Save or duplicate installs; save/load custom formations; export/import playbooks.
-- **Practice:** use “Test in practice” inside an offensive install. The field resets after each snap. The selected unsaved install is used for practice.
+- **Playbook:** switch named books, search formations/concepts/tags, create or edit alignments, drag athletes, draw routes, choose formation/route templates, edit precise path points, assign blocks, draw motion or shifts, set delays/events and quarterback reads, and add conditional rules. Save or duplicate installs; save/load custom formations; export/import playbooks.
+- **Practice:** use “Test in practice” inside an offensive install. The field resets after each snap. The selected unsaved install is used for practice. Practice setup changes the situation/opponent/defense, and the twenty-snap study reports actual independent simulation results.
 - **Defense:** set frequency weights, create defensive fronts, zones, man targets, run fits, stunts and contain responsibilities. Zero excludes ordinary selection; a legal Cover 3 fallback is used if no call is eligible.
 - **Team fit:** compares all eight rosters with your book. It does not change athlete ratings or apply a performance multiplier.
-- **Program:** play or simulate weeks, edit remaining opponents/venues, customize school colors and rules, edit athlete ratings, advance through a four-school playoff, and start the next year with development, graduation, and incoming freshmen.
+- **Program:** play or simulate weeks, edit remaining opponents/venues, customize school colors and rules, edit athlete ratings and depth charts, choose individual training, inspect season/career leaders and archived box scores, advance through a four-school playoff, and start the next year with development, graduation, and incoming freshmen.
 - **Roster:** inspect all 44 athletes per official school. Toggle to your franchise roster for editing.
-- **Film:** review up to 100 indexed local snaps; pause, scrub, change speed, show paths/coverage landmarks, and tap decision events. Tap an athlete on the broadcast field to identify him.
+- **Film:** review up to 1,000 indexed local snaps; pause, scrub, change speed, show paths/coverage landmarks, and tap decision events. Tap an athlete on the broadcast field to identify him.
 
 ### Friend games
 
@@ -86,14 +96,14 @@ The offensive and defensive playbooks are copied into the match at creation/join
 
 A transaction writes the next game state and immutable snap together. Sequence and actor checks prevent accidental stale/duplicate processing. Failed attempts remain in a local pending slot and are retried on sign-in/reconnection. Transactions require connectivity; the UI reports errors rather than silently claiming that an offline turn was submitted.
 
-**Live acceptance check still required:** with two real accounts, create/join a game, submit from two tabs, disconnect during submission, reconnect, check the replay and sequence, change possession, finish the game, and verify the leaderboard. The included pure transaction tests do not replace this check.
+**Production acceptance check still required:** with two real accounts, create/join a game, submit from two tabs, disconnect during submission, reconnect, check the replay and sequence, change possession, finish the game, and verify the leaderboard. The included Firebase emulator tests verify client/rules behavior, including a regulation game and interrupted-transport retry; they do not replace this production/device check.
 
 ## Saves and recovery
 
 - Playbooks, franchise, current local game, settings and films use IndexedDB, not temporary JavaScript memory.
-- Signing in does not automatically overwrite your device save. Use Friends → **Cloud backup** to upload your current profile and **Restore cloud backup** to retrieve it on another device.
+- On a fresh device, a signed-in cloud profile can restore automatically. Existing device data is not silently replaced. After initial synchronization, automatic cloud profile backups run when enabled in Settings. A changed remote revision stops automatic overwrites and leaves your local copy intact. Friends → **Cloud backup** explicitly uploads your current profile; **Restore cloud backup** retrieves the remote copy.
 - Use Settings → **Export full backup** for a portable JSON backup of playbooks, franchise, settings and current local game.
-- Film bytes stay on their originating device. Profile backups do not bundle local films. Friend-game films are separately retained in Firestore.
+- Individual film JSON files can be exported from the replay toolbar. Film bytes stay on their originating device. Profile backups do not bundle local films. Friend-game films are separately retained in Firestore.
 - Do not clear browser/app storage without making a backup. A different browser or installed app may have its own local saves.
 - Updates use a network-first service worker. Close and reopen the game after uploading a changed source version if the prior worker remains active.
 
@@ -102,6 +112,8 @@ A transaction writes the next game state and immutable snap together. Sequence a
 | File | Responsibility |
 | --- | --- |
 | `data.js` | Seeded utilities, eight 44-athlete rosters, plays, defenses, legality, fit and lineup selection |
+| `tactics.js` / `special-teams.js` | Visible coverage sectors, pursuit, run lanes, special-team personnel and 30 Hz kick plays |
+| `film-analysis.js` | Coaching notes derived from actual snap events |
 | `engine.js` | 30 Hz scrimmage simulation, decisions, movement, blocks, ball flight, catches and tackles |
 | `rules.js` | Game state, clock, down/distance, possession, scoring, special teams, CPU offense and overtime |
 | `render.js` | Original Canvas stadium, angled projection, athletes and replay interpolation |
@@ -111,7 +123,11 @@ A transaction writes the next game state and immutable snap together. Sequence a
 | `cloud.js` | Firebase Authentication, saves, games, transactions, films and derived standings |
 | `storage.js` | Transaction-completion-aware IndexedDB reads and writes |
 | `sim-worker.js` | Simulation and district-week work off the UI thread |
-| `tests.mjs` | Football, franchise, deterministic replay and turn validation tests |
+| `tests.mjs` | Football, franchise, deterministic replay, array/payload and migration tests |
+| `football.js` / `play-art.js` | Motion timing, blocking responsibilities, conditional logic and field play art |
+| `formations.js` / `statistics.js` | Formation/front templates, scouting, game and career statistics |
+| `wire.js` / `payload.js` / `migration.js` | Firestore-compatible encoding, compression and save upgrades |
+| `test-firestore.mjs` / `firebase-test.json` | Isolated emulator integration checks |
 | `test-ui.mjs` | DOM interaction smoke checks, including touch route drawing and persistence |
 | `.github/workflows/check.yml` | Optional CI; validates source and runs tests |
 
@@ -124,10 +140,30 @@ npm ci --ignore-scripts
 npm run check
 ```
 
-This is **not required to publish or play**. The optional dependency `happy-dom` is for tests only. Do not upload `node_modules` to GitHub Pages.
+This is **not required to publish or play**. All npm dependencies are for tests only; the hosted game uses native modules and the Firebase CDN. Do not upload `node_modules` to GitHub Pages.
 
-The CI workflow runs on a push, pull request, or manual invocation when committed. GitHub Pages publication still uses Settings → Pages → branch/root; no deployment workflow is required.
+To run the isolated Firestore tests with Java 17+ available:
+
+```sh
+npm run test:firebase
+```
+
+`npm run test:balance` also runs eight full regulation matchups, three complete seasons/offseasons and all 176 official-roster/default-concept combinations. If the local Java emulator reports a heap error, use `JAVA_TOOL_OPTIONS=-Xmx1536m npm run test:firebase` in a Linux/macOS development shell; this setting affects only local test infrastructure.
+
+This explicitly targets `demo-hs-football`, starts the emulator and tests two identities and an entire regulation game. It does not connect to `hs-football-gm` or alter its data/rules. The CLI downloads emulator components on first use.
+
+The CI workflow runs engine/DOM and Firestore jobs on a push, pull request, or manual invocation when committed. GitHub Pages publication still uses Settings → Pages → branch/root; no deployment workflow is required.
+
+## New game controls
+
+- **Routes:** show play art before the snap and assignment paths during film. Tap an athlete to isolate their responsibility. The play-art preview is visible before the snap even when the live overlay is off.
+- **Field View:** expand the stadium inside the phone browser. Exit with the same button. It remains expanded between calls.
+- **Coach notes:** after the whistle, review the quarterback release, exchanges, coverage contact and tackle from that snap's actual event trail.
+- **Special teams:** use Onside kick during a kickoff, directional punts during scrimmage and Kick PAT during a try. The automatic return unit can call a fair catch when coverage arrives. Overtime settings can require a two-point play.
+- **Option / triple option:** select the dive runner, read side and mesh time. Draw the QB path for his keep track; in triple option RB trails as the pitch back. A toss is a backward live ball. A missed exchange can be recovered by either team.
+- **Board drafts:** interrupted editor sessions can be reopened with Resume board draft in Playbook. Saving an install clears its draft. Drafts are local to this browser.
+- **Offline updates:** the installed shell retains one complete version. If an update is ready, close every HS Football window and reopen; device profiles are preserved.
 
 ## Verification limits
 
-The exact check results and substantive gaps are in `IMPLEMENTATION.md`. Browser layout/touch performance on a real phone, live authenticated Firestore behavior, deployed rules, Google provider configuration, and a complete NFHS officiating implementation are not verified or claimed complete.
+The exact check results and concrete limits are in `IMPLEMENTATION.md`. The package has engine/DOM tests and actual Firestore emulator integration checks. Production Firebase configuration and hands-on phone/iPad performance remain to be verified in your environment.

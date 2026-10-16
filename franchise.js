@@ -1,3 +1,4 @@
+import { mergeTotals } from "./statistics.js";
 import { TEAMS, clone, rng, hash, ATTR, clamp, makeRoster } from "./data.js";
 import { newGame, autoGame } from "./rules.js";
 export function schedule() {
@@ -38,6 +39,10 @@ export function createFranchise(team = 1, name, colors) {
     playoffs: null,
     champion: null,
     training: "balanced",
+    seasonStats: {},
+    careerStats: {},
+    graduation: [],
+    trainingPlans: {},
     rules: { quarter: 720, otStart: 90, otTwoFrom: 3 },
   };
 }
@@ -92,21 +97,40 @@ export function franchiseGame(f, m = matchup(f)) {
 export function finishWeek(franchise, played) {
   const f = clone(franchise),
     matches = f.week < 10 ? f.schedule[f.week] : f.playoffs.rounds[f.week - 10];
+  f.seasonStats ||= {};
+  f.careerStats ||= {};
   for (const m of matches) {
-    if (played && (m.home === f.team || m.away === f.team)) {
-      m.score = played.score;
+    const own = m.home === f.team || m.away === f.team;
+    const g = played && own ? played : autoGame(franchiseGame(f, m));
+    if (!g.final)
+      throw Error("Cannot advance the week with an unfinished game");
+    m.score = g.score;
+    for (const [side, teamId] of [
+      [0, m.home],
+      [1, m.away],
+    ]) {
+      f.seasonStats[teamId] = mergeTotals(f.seasonStats[teamId], g.stats[side]);
+      f.careerStats[teamId] = mergeTotals(f.careerStats[teamId], g.stats[side]);
+    }
+    if (own)
       f.records.push({
         year: f.year,
         week: f.week,
         opponent: m.home === f.team ? m.away : m.home,
-        score: played.score,
+        score: g.score,
         home: m.home,
-        stats: played.stats,
+        stats: g.stats,
+        athletes: g.teams.map((t) =>
+          t.roster.map(({ id, name, number, pos }) => ({
+            id,
+            name,
+            number,
+            pos,
+          })),
+        ),
+        drives: g.drives || [],
+        scoreLine: g.scoreLine || [],
       });
-    } else {
-      const g = autoGame(franchiseGame(f, m));
-      m.score = g.score;
-    }
   }
   f.week++;
   if (f.week === 10) {
@@ -139,25 +163,54 @@ export function nextYear(franchise) {
     year: f.year,
     champion: f.teams[f.champion].school,
     standings: standings(f),
+    seasonStats: clone(f.seasonStats || {}),
   });
   f.year++;
   const r = rng(hash(f.year));
   for (const team of f.teams) {
     const grads = team.roster.filter((p) => p.grade === 12),
-      incoming = makeRoster(team.id, f.year)
-        .slice(0, grads.length)
-        .map((p) => ({ ...p, grade: 9 }));
+      pool = makeRoster(team.id, f.year),
+      incoming = grads.map((grad, i) => {
+        const j = pool.findIndex((p) => p.pos === grad.pos),
+          p = pool.splice(j >= 0 ? j : 0, 1)[0];
+        p.pos = grad.pos;
+        // Graduates release their jersey; preserve the position's legal number pool.
+        p.number = grad.number;
+        p.grade = 9;
+        const names = new Set(
+          team.roster.filter((p) => p.grade < 12).map((p) => p.name),
+        );
+        if (names.has(p.name)) {
+          const parts = p.name.split(" ");
+          p.name =
+            parts[0] +
+            " " +
+            String.fromCharCode(65 + ((f.year + i) % 26)) +
+            ". " +
+            parts.slice(1).join(" ");
+        }
+        return p;
+      });
+    f.graduation ||= [];
+    f.graduation.push(
+      ...grads.map((p) => ({
+        ...p,
+        year: f.year - 1,
+        school: team.school,
+        career: clone(f.careerStats?.[team.id]?.players?.[p.id] || {}),
+      })),
+    );
     team.roster = team.roster
       .filter((p) => p.grade < 12)
       .map((p) => {
         p.grade++;
         for (const a of ATTR) {
           const emphasis =
-            f.training === "speed"
+            (f.trainingPlans?.[p.id] || f.training) === "speed"
               ? ["speed", "acceleration", "agility"]
-              : f.training === "strength"
+              : (f.trainingPlans?.[p.id] || f.training) === "strength"
                 ? ["strength", "runBlock", "passBlock", "tackle"]
-                : f.training === "skills"
+                : (f.trainingPlans?.[p.id] || f.training) === "skills"
                   ? ["accuracy", "decision", "catching", "coverage", "route"]
                   : ATTR;
           const gain = Math.floor(r() * 3) + (emphasis.includes(a) ? 1 : 0);
@@ -176,6 +229,7 @@ export function nextYear(franchise) {
     }
     team.roster.push(...incoming);
   }
+  f.seasonStats = {};
   f.week = 0;
   f.schedule = schedule();
   f.playoffs = null;

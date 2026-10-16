@@ -1,3 +1,5 @@
+import { toWire, fromWire } from "./wire.js";
+import { encodePayload, decodePayload } from "./payload.js";
 import { firebaseConfig } from "./firebase-config.js";
 import { VERSION, clone } from "./data.js";
 import { turnPlan, joinPlan } from "./sync.js";
@@ -39,16 +41,47 @@ function user() {
 function ref(path) {
   return sdk.doc(db, ROOT + path);
 }
-export async function cloudSave(data) {
-  await sdk.setDoc(ref(`coaches/${user()}/saves/main`), {
-    payload: JSON.stringify(data),
-    updated: Date.now(),
-    version: VERSION,
-  });
+export async function cloudEnvelope() {
+  const s = await sdk.getDoc(ref(`coaches/${user()}/saves/main`));
+  if (!s.exists()) return null;
+  const d = s.data();
+  return {
+    data: await decodePayload(d),
+    revision: d.revision || 0,
+    updated: d.updated,
+  };
 }
 export async function cloudLoad() {
-  const s = await sdk.getDoc(ref(`coaches/${user()}/saves/main`));
-  return s.exists() ? JSON.parse(s.data().payload) : null;
+  return (await cloudEnvelope())?.data || null;
+}
+export async function cloudSave(data, expectedRevision = null) {
+  const payload = await encodePayload(data),
+    r = ref(`coaches/${user()}/saves/main`);
+  if (payload.payload.length > 900000)
+    throw Error(
+      "Cloud profile is too large; export a backup before continuing",
+    );
+  return sdk.runTransaction(db, async (t) => {
+    const old = await t.get(r),
+      revision = old.exists() ? old.data().revision || 0 : 0;
+    if (expectedRevision !== null && revision !== expectedRevision)
+      throw Error(
+        "Cloud profile changed on another device. Restore the cloud copy or explicitly upload your local copy.",
+      );
+    const next = revision + 1;
+    t.set(r, {
+      ...payload,
+      updated: Date.now(),
+      version: VERSION,
+      revision: next,
+    });
+    return next;
+  });
+}
+export function useTransportForTests(transport) {
+  sdk = transport.sdk;
+  auth = transport.auth;
+  db = transport.db;
 }
 export async function createMatch(game, book, displayName) {
   const uid = user(),
@@ -72,7 +105,7 @@ export async function createMatch(game, book, displayName) {
   await sdk.runTransaction(db, async (t) => {
     const s = await t.get(ref("games/" + code));
     if (s.exists()) throw Error("Join code collision; retry");
-    t.set(ref("games/" + code), data);
+    t.set(ref("games/" + code), toWire(data));
   });
   return code;
 }
@@ -84,14 +117,14 @@ export async function joinMatch(code, team, book, defense, displayName) {
       s = await t.get(r);
     if (!s.exists()) throw Error("Join code not found");
     const m = joinPlan(
-      s.data(),
+      fromWire(s.data()),
       uid,
       team,
       book,
       defense,
       displayName || auth.currentUser.email?.split("@")[0] || "Coach",
     );
-    t.set(r, m);
+    t.set(r, toWire(m));
   });
   return code;
 }
@@ -102,7 +135,7 @@ export async function listMatches() {
   );
   const s = await sdk.getDocs(q);
   return s.docs
-    .map((d) => ({ ...d.data(), id: d.id }))
+    .map((d) => ({ ...fromWire(d.data()), id: d.id }))
     .sort((a, b) => b.updated - a.updated);
 }
 export function watchMatch(code, callback, onError) {
@@ -110,7 +143,7 @@ export function watchMatch(code, callback, onError) {
   return sdk.onSnapshot(
     ref("games/" + code),
     (s) => {
-      if (s.exists()) callback(s.data());
+      if (s.exists()) callback(fromWire(s.data()));
     },
     onError,
   );
@@ -121,28 +154,48 @@ export async function submit(code, expectedSeq, nextGame, film) {
     snap = ref(
       `games/${code}/snaps/${String(expectedSeq + 1).padStart(5, "0")}`,
     );
+  const payload = await encodePayload(film);
+  if (payload.payload.length > 840000)
+    throw Error("Replay is too large for this turn");
   const pending = { code, expectedSeq, nextGame, film };
   await save("pending-" + uid, pending);
-  const committed = await sdk.runTransaction(db, async (t) => {
-    const s = await t.get(r),
-      existing = await t.get(snap);
-    if (existing.exists()) {
-      if (existing.data().actor !== uid)
-        throw Error("A different turn was committed");
-      return s.data();
-    }
-    const m = s.data(),
-      patch = turnPlan(m, uid, expectedSeq, nextGame);
-    t.set(snap, {
-      actor: uid,
-      seed: film.seed,
-      version: VERSION,
-      payload: JSON.stringify(film),
-      created: Date.now(),
+  let committed;
+  try {
+    committed = await sdk.runTransaction(db, async (t) => {
+      const s = await t.get(r),
+        existing = await t.get(snap);
+      if (existing.exists()) {
+        if (existing.data().actor !== uid)
+          throw Error("A different turn was committed");
+        return fromWire(s.data());
+      }
+      const m = fromWire(s.data()),
+        patch = turnPlan(m, uid, expectedSeq, nextGame);
+      t.set(snap, {
+        actor: uid,
+        seed: film.seed,
+        version: VERSION,
+        ...payload,
+        created: Date.now(),
+      });
+      t.update(r, toWire(patch));
+      return { ...m, ...patch };
     });
-    t.update(r, patch);
-    return { ...m, ...patch };
-  });
+  } catch (error) {
+    const [saved, current] = await Promise.all([
+      sdk.getDoc(snap),
+      sdk.getDoc(r),
+    ]);
+    if (
+      saved.exists() &&
+      saved.data().actor === uid &&
+      saved.data().seed === film.seed &&
+      current.exists() &&
+      current.data().seq >= expectedSeq + 1
+    )
+      committed = fromWire(current.data());
+    else throw error;
+  }
   await save("pending-" + uid, null);
   return committed;
 }
@@ -155,7 +208,7 @@ export async function cloudFilm(code, seq) {
   const s = await sdk.getDoc(
     ref(`games/${code}/snaps/${String(seq).padStart(5, "0")}`),
   );
-  return s.exists() ? JSON.parse(s.data().payload) : null;
+  return s.exists() ? decodePayload(s.data()) : null;
 }
 export async function leaderboard() {
   user();
@@ -167,7 +220,7 @@ export async function leaderboard() {
     ),
     rows = {};
   for (const d of s.docs) {
-    const m = d.data();
+    const m = fromWire(d.data());
     m.members.forEach((id, i) => {
       const r = rows[id] || {
         id,
@@ -195,4 +248,11 @@ export async function leaderboard() {
   return Object.values(rows).sort(
     (a, b) => b.wins - a.wins || a.losses - b.losses,
   );
+}
+
+export async function pendingTurn() {
+  return load("pending-" + user());
+}
+export async function discardPending() {
+  return save("pending-" + user(), null);
 }

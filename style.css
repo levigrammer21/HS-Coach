@@ -1158,3 +1158,97 @@ dialog::backdrop {
     transition: none !important;
   }
 }
+.book-bar {
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #10232c;
+}
+.book-bar label {
+  min-width: 165px;
+}
+.book-bar > label {
+  flex: 1;
+  max-width: 320px;
+}
+.list-row[role="button"] {
+  cursor: pointer;
+}
+.list-row[role="button"]:hover {
+  color: var(--gold);
+}
+@media (max-width: 520px) {
+  .book-bar {
+    gap: 12px;
+    padding: 12px;
+  }
+  .book-bar > label {
+    max-width: none;
+    width: 100%;
+  }
+  .book-bar .row {
+    width: 100%;
+  }
+  .book-bar label {
+    flex: 1;
+  }
+}
+.art-legend {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  flex-basis: 100%;
+  padding: 2px 4px;
+}
+.art-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  margin-left: 7px;
+}
+.art-legend i:first-child {
+  margin-left: 0;
+}
+
+/* Field view works on phone browsers that do not expose the Fullscreen API. */
+.game-layout.field-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  overflow: auto;
+  background: #0c1820;
+  display: block;
+  padding: max(8px, env(safe-area-inset-top))
+    max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom))
+    max(8px, env(safe-area-inset-left));
+}
+.field-expanded .stadium-wrap canvas {
+  height: 65dvh;
+  min-height: 240px;
+}
+.field-expanded .call-side {
+  max-width: 900px;
+  margin: 14px auto;
+}
+.field-expanded .film-toolbar button {
+  min-height: 44px;
+}
+.film-toolbar button {
+  min-height: 44px;
+}
+.film-toolbar input {
+  min-height: 44px;
+  accent-color: var(--gold);
+}
+@media (orientation: landscape) and (max-height: 550px) {
+  .field-expanded .stadium-wrap canvas {
+    height: 58dvh;
+    min-height: 160px;
+  }
+  .field-expanded .scoreboard {
+    max-height: 64px;
+  }
+}

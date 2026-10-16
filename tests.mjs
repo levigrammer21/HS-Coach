@@ -370,7 +370,11 @@ test("friend game join locks two coaches, permits same official school, and sets
   const n = joinPlan(m, "b", TEAMS[1], defaults(), defenseDefaults(), "B");
   assert.equal(n.members.length, 2);
   assert.equal(n.turn, "b");
-  assert.deepEqual(n.game.teams[0], n.game.teams[1]);
+  const identity = (t) => ({
+    ...t,
+    roster: t.roster.map(({ id, sourceId, ...p }) => p),
+  });
+  assert.deepEqual(identity(n.game.teams[0]), identity(n.game.teams[1]));
   assert.equal(m.members.length, 1);
   assert.throws(() =>
     joinPlan(n, "c", TEAMS[0], defaults(), defenseDefaults(), "C"),
@@ -438,4 +442,526 @@ test("schedule customization preserves eight unique schools and locked completed
   f.week = 1;
   assert.throws(() => reschedule(f, 0, 3));
 });
-test('clock spike counts as an incomplete pass attempt',()=>{const p=defaults().find(p=>p.kind==='spike'),f=simulateSeed(310,p);assert.equal(f.result.reason,'incomplete');assert.equal(f.result.pass,true);let g=newGame();g.phase='scrimmage';g.possession=0;g=advance(g,f);assert.equal(g.stats[0].attempts,1);assert.equal(g.running,false)});
+test("clock spike counts as an incomplete pass attempt", () => {
+  const p = defaults().find((p) => p.kind === "spike"),
+    f = simulateSeed(310, p);
+  assert.equal(f.result.reason, "incomplete");
+  assert.equal(f.result.pass, true);
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.possession = 0;
+  g = advance(g, f);
+  assert.equal(g.stats[0].attempts, 1);
+  assert.equal(g.running, false);
+});
+import {
+  previewFilm,
+  preSnapFrames,
+  pointOnPath,
+  protectionPlan,
+  evaluateLogic,
+  smoothRoute,
+} from "./football.js";
+import { playArt } from "./play-art.js";
+import { FORMATIONS, applyFormation, defensiveTemplate } from "./formations.js";
+import { encodePayload, decodePayload } from "./payload.js";
+import { lineup } from "./data.js";
+import { leaders } from "./statistics.js";
+test("play art includes distinct routes, run arrows, blocking bars, motion and progression numbers", () => {
+  const p = defaults().find((p) => p.name === "Power Right");
+  p.slots[8].motion = [[5, -2]];
+  const art = playArt(p, call(), { defense: true });
+  assert.ok(art.lines.some((l) => l.kind === "run"));
+  assert.ok(art.lines.some((l) => l.kind === "block" && l.end === "bar"));
+  assert.ok(art.lines.some((l) => l.kind === "motion" && l.dashed));
+  assert.equal(art.reads[0].n, 1);
+  assert.ok(art.zones.length > 0);
+});
+test("all formation templates preserve eleven athletes and legal alignments", () => {
+  for (const name of FORMATIONS) {
+    const p = applyFormation(play(), name);
+    assert.equal(p.slots.length, 11);
+    assert.deepEqual(validateFormation(p), [], name);
+  }
+});
+test("motion and shifts are animated before snap; live simulation begins at the rendered endpoint", () => {
+  const p = play();
+  p.slots[8].motion = [
+    [-5, -1.5],
+    [4, -1.5],
+  ];
+  const f = simulateSeed(73, p);
+  const before = f.frames.find((x) => x.t === -3),
+    snap = f.frames.filter((x) => x.t === 0).at(-1);
+  assert.equal(before.players[8][0], -10);
+  assert.equal(snap.players[8][0], 4);
+  assert.ok(
+    f.frames.some(
+      (x) => x.t < 0 && x.players[8][0] > -10 && x.players[8][0] < 4,
+    ),
+  );
+  assert.equal(validateFormation(p).length, 0);
+});
+test("man coverage follows motion using the observed target path", () => {
+  const p = play();
+  p.slots[5].y = -1.5;
+  p.slots[8].y = 0;
+  p.slots[5].motion = [[-4, -1.5]];
+  const c = defenseDefaults()[2];
+  c.slots[7].target = "X";
+  const f = previewFilm(TEAMS[1], TEAMS[0], p, c);
+  assert.notEqual(f.frames[0].players[18][0], f.frames.at(-1).players[18][0]);
+});
+test("Cover 3 has three deep defenders; Cover 2 two; Cover 1 one", () => {
+  assert.deepEqual(
+    defenseDefaults()
+      .slice(0, 3)
+      .map((c) => c.slots.filter((s) => s.assignment === "deep").length),
+    [3, 2, 1],
+  );
+});
+test("front templates actually move defenders and change pressure responsibilities", () => {
+  const a = defensiveTemplate(call(), "3–4"),
+    b = defensiveTemplate(call(), "5–2");
+  assert.notDeepEqual(a.slots, b.slots);
+  assert.equal(b.slots.filter((p) => p.assignment === "rush").length, 5);
+});
+test("conditional rules evaluate live leverage and time and affect quarterback trace", () => {
+  const p = play();
+  p.rules = [
+    {
+      id: "r1",
+      when: "time",
+      threshold: 0.5,
+      action: "prioritize",
+      target: "H",
+    },
+  ];
+  const f = simulateSeed(55, p);
+  assert.ok(f.events.some((e) => e.type === "logic"));
+  const os = p.slots.map((s) => ({
+      ...s,
+      vx: 0,
+      vy: 0,
+      ratings: { intelligence: 90, awareness: 90 },
+    })),
+    ds = call().slots.map((s) => ({ ...s, vx: 0, vy: 0 }));
+  assert.equal(evaluateLogic(p, { os, ds, qb: os[10], t: 0.3 }).length, 0);
+  assert.equal(evaluateLogic(p, { os, ds, qb: os[10], t: 1 }).length, 1);
+});
+test("rounded route transitions insert intermediate physical waypoints", () => {
+  const path = smoothRoute(
+    [0, 0],
+    [
+      [0, 10],
+      [10, 10],
+    ],
+  );
+  assert.ok(path.length > 2);
+  assert.deepEqual(path.at(-1), [10, 10]);
+  assert.ok(path.some(([x, y]) => x > 0 && x < 2 && y < 10));
+});
+test("post-whistle replay contains a fall, ground and recovery sequence without charging game clock", () => {
+  const f = simulateSeed(13);
+  assert.ok(f.frames.at(-1).t > f.result.duration);
+  if (["tackle", "sack"].includes(f.result.reason)) {
+    const states = f.frames.flatMap((f) => f.players.map((p) => p[4]));
+    assert.ok(states.includes("fall"));
+    assert.ok(states.includes("rise"));
+  }
+});
+test("explicit depth chart selects the starter and fatigue rotates a reserve", () => {
+  const team = clone(TEAMS[1]),
+    slots = play().slots,
+    backup = team.roster.find(
+      (p) => p.pos === "QB" && p.id !== team.roster[0].id,
+    );
+  team.depth = { offense: { QB: backup.id } };
+  assert.equal(lineup(team, slots)[10].id, backup.id);
+  assert.notEqual(lineup(team, slots, { [backup.id]: 0.95 })[10].id, backup.id);
+});
+test("compressed profile/replay encoding is exact and legacy JSON still decodes", async () => {
+  const f = simulateSeed(71),
+    encoded = await encodePayload(f);
+  assert.deepEqual(await decodePayload(encoded), f);
+  assert.deepEqual(await decodePayload({ payload: '{"a":1}' }), { a: 1 });
+  assert.ok(encoded.payload.length < JSON.stringify(f).length);
+});
+test("accepted defensive foul at zero permits an untimed down before the period ends", () => {
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.possession = 0;
+  g.quarter = 4;
+  g.clock = 1;
+  g.score = [0, 3];
+  g = advance(
+    g,
+    fake({
+      reason: "penalty",
+      penalty: { name: "DPI", side: 1, yards: 15, repeat: true },
+    }),
+  );
+  assert.equal(g.final, false);
+  assert.equal(g.untimedDown, true);
+  g = advance(g, fake({ reason: "incomplete" }));
+  assert.equal(g.final, true);
+});
+test("simulated franchise games contribute season and career stats and program game records", () => {
+  let f = createFranchise();
+  f.rules.quarter = 5;
+  f = finishWeek(f, null);
+  assert.equal(f.records.length, 1);
+  assert.ok(f.seasonStats[1]);
+  assert.ok(f.careerStats[1]);
+  assert.ok(f.seasonStats[1].plays > 0);
+  assert.ok(f.records[0].stats);
+});
+test("class turnover replaces graduated positions and archives their career records", () => {
+  let f = createFranchise();
+  const before = f.teams[1].roster.reduce(
+    (a, p) => ((a[p.pos] = (a[p.pos] || 0) + 1), a),
+    {},
+  );
+  f.champion = 1;
+  const g = nextYear(f),
+    after = g.teams[1].roster.reduce(
+      (a, p) => ((a[p.pos] = (a[p.pos] || 0) + 1), a),
+      {},
+    );
+  assert.deepEqual(after, before);
+  assert.ok(g.graduation.length > 0);
+});
+import { toWire, fromWire } from "./wire.js";
+import { migrateProfile } from "./migration.js";
+test("Firestore wire data round-trips every nested playbook, route and score array without illegal nested arrays", () => {
+  const value = {
+      game: newGame(),
+      books: [defaults(), defaults()],
+      scoreLine: [
+        [0, 7],
+        [3, 0],
+      ],
+    },
+    wire = toWire(value);
+  function check(v, inArray = false) {
+    if (Array.isArray(v)) {
+      assert.equal(inArray, false);
+      v.forEach((p) => check(p, true));
+    } else if (v && typeof v === "object")
+      Object.values(v).forEach((p) => check(p, false));
+  }
+  check(wire);
+  assert.deepEqual(fromWire(wire), value);
+});
+test("untouched factory migration preserves custom installs and creates no duplicate play IDs", () => {
+  const p = play();
+  p.name = "My custom Air Raid";
+  p.slots[5].path = [[10, 7]];
+  const d = migrateProfile({ version: "hsf-1.0.0", book: [p], books: [] });
+  assert.equal(d.book[0].name, p.name);
+  assert.deepEqual(d.book[0].slots[5].path, [[10, 7]]);
+  assert.equal(d.libraryRevision, 3);
+});
+test("mesh drag routes cross inward rather than running outward", () => {
+  const p = defaults().find((p) => p.name === "Mesh"),
+    left = p.slots.find((s) => s.id === "H"),
+    right = p.slots.find((s) => s.id === "Z");
+  assert.ok(left.path.at(-1)[0] > left.x);
+  assert.ok(right.path.at(-1)[0] < right.x);
+});
+test("a period expiring during selected runoff does not simulate or count a fake snap", () => {
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.clock = 2;
+  g.running = true;
+  const p = play(),
+    f = runSnap(g, p, 45);
+  assert.equal(f.result.reason, "period_expired");
+  assert.equal(f.frames.length, 1);
+  g = advance(g, f);
+  assert.equal(g.quarter, 2);
+  assert.equal(g.stats[1].plays, 0);
+});
+test("a lead blocker reaches engagement instead of remaining stuck forever at its final path point", () => {
+  const p = defaults().find((p) => p.name === "Power Right"),
+    f = simulateSeed(5, p);
+  const lead = f.players.find((p) => p.id === "Y");
+  assert.ok(f.result.production[lead.athleteId]?.blocks > 0);
+});
+test("feature running back is selected before an automatic fullback in I personnel", () => {
+  const p = defaults().find((p) => p.name === "Power Right"),
+    l = lineup(TEAMS[0], p.slots);
+  assert.equal(l[9].id, TEAMS[0].roster[1].id);
+  assert.notEqual(l[8].id, l[9].id);
+});
+test("two-way depth choices reserve explicit athletes and never duplicate a player on the same unit", () => {
+  const t = clone(TEAMS[0]),
+    p = play();
+  t.depth = { offense: { X: t.roster.find((p) => p.pos === "CB").id } };
+  const l = lineup(t, p.slots);
+  assert.equal(l[5].id, t.depth.offense.X);
+  assert.equal(new Set(l.map((p) => p.id)).size, 11);
+});
+
+test("fan protection puts tackles on edges and guards on interior rushers", () => {
+  const p = play(),
+    c = call(),
+    plan = protectionPlan(p.slots, c.slots, p);
+  assert.equal(plan.LT, "D0");
+  assert.equal(plan.RT, "D3");
+  assert.equal(plan.LG, "D1");
+  assert.equal(plan.RG, "D2");
+});
+test("running lane decisions preserve lateral and counter tracks", async () => {
+  const { runningLane } = await import("./tactics.js");
+  const r = { x: 0, y: -3, side: 0, ratings: { awareness: 90, agility: 90 } };
+  const target = { x: 7, y: -3 };
+  assert.deepEqual(
+    runningLane(
+      r,
+      target,
+      [{ x: 1, y: 0, id: "e", ratings: { tackle: 80 } }],
+      new Set(),
+    ),
+    target,
+  );
+});
+test("coverage follows observed geometry rather than a receiver's hidden future path", async () => {
+  const { coverageTarget } = await import("./tactics.js");
+  const def = {
+    id: "D1",
+    x: 0,
+    y: 10,
+    zone: [0, 8],
+    assignment: "zone",
+    ratings: { awareness: 80 },
+  };
+  const r = {
+    id: "X",
+    x: 2,
+    y: 6,
+    vx: 2,
+    vy: 3,
+    assignment: "route",
+    path: [[20, 30]],
+  };
+  const before = coverageTarget(def, [r], [def], { x: 0, y: -5 });
+  r.path = [[-20, -5]];
+  assert.deepEqual(coverageTarget(def, [r], [def], { x: 0, y: -5 }), before);
+});
+test("triple option pitches a live ball with an airborne carrier-free interval", () => {
+  const p = defaults().find((p) => p.kind === "triple");
+  const f = simulate({
+    seed: 11,
+    offense: TEAMS[2],
+    defense: TEAMS[3],
+    play: p,
+    call: call(),
+    penalties: false,
+  });
+  const pitch = f.events.find((e) => e.type === "pitch");
+  assert.ok(pitch);
+  assert.ok(
+    f.frames.some((v) => v.t >= pitch.t && v.carrier === -1 && v.ball[2] > 1),
+  );
+  assert.ok(
+    f.events.some(
+      (e) => e.type === "handoff" && e.text.includes("Pitch secured"),
+    ),
+  );
+  assert.equal(f.result.pass, false);
+});
+test("a contain edge can force the option give rather than the keep", () => {
+  const p = defaults().find((p) => p.kind === "option"),
+    d = call();
+  d.slots[3].assignment = "contain";
+  const f = simulate({
+    seed: 11,
+    offense: TEAMS[2],
+    defense: TEAMS[3],
+    play: p,
+    call: d,
+    penalties: false,
+  });
+  assert.ok(f.events.some((e) => e.type === "handoff"));
+  assert.ok(!f.events.some((e) => e.text.includes("QB keeps")));
+});
+test("special teams select 22 distinct athletes and preserve seeded film", async () => {
+  const { specialTeamsUnit } = await import("./tactics.js");
+  for (const t of TEAMS)
+    for (const receiving of [false, true]) {
+      const ps = specialTeamsUnit(t, "punt", receiving);
+      assert.equal(ps.length, 11);
+      assert.equal(new Set(ps.map((p) => p.id)).size, 11);
+      if (!receiving) assert.equal(ps[0].pos, "P");
+    }
+  const g = newGame();
+  g.phase = "scrimmage";
+  g.ball = 45;
+  const a = simulateKick(g, "punt_left", 45),
+    b = simulateKick(g, "punt_right", 45);
+  assert.deepEqual(a, simulateKick(g, "punt_left", 45));
+  assert.notDeepEqual(a.frames, b.frames);
+  assert.equal(new Set(a.players.map((p) => p.athleteId)).size, 22);
+});
+test("onside recoveries and punt touchbacks update possession without phantom downs", () => {
+  let g = newGame(),
+    side = g.possession;
+  g = advance(
+    g,
+    fake({ reason: "kickoff", onside: true, retained: true, retainedBall: 52 }),
+  );
+  assert.equal(g.possession, side);
+  assert.equal(g.ball, 52);
+  assert.equal(g.down, 1);
+  assert.equal(g.phase, "scrimmage");
+  g = advance(g, fake({ reason: "punt", touchback: true, nextBall: 20 }));
+  assert.equal(g.possession, 1 - side);
+  assert.equal(g.ball, 20);
+});
+test("invalid special-teams calls are rejected at the rules boundary", () => {
+  const g = newGame();
+  g.phase = "try";
+  assert.throws(() => runSnap(g, "punt", 1));
+  g.overtime = { round: 3 };
+  assert.throws(() => runSnap(g, "extra_point", 1));
+  g.phase = "scrimmage";
+  assert.throws(() => runSnap(g, "onside", 1));
+});
+test("a last-second winning touchdown ends without an unnecessary conversion", () => {
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.quarter = 4;
+  g.clock = 1;
+  g.running = false;
+  g.score = [0, 0];
+  g = advance(g, fake({ reason: "touchdown", yards: 75, duration: 4 }));
+  assert.equal(g.final, true);
+  assert.equal(g.phase, "final");
+});
+test("second overtime possession ends immediately on a winning touchdown", () => {
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.quarter = 5;
+  g.clock = 0;
+  g.ball = 90;
+  g.line = 100;
+  g.possession = 1;
+  g.score = [3, 0];
+  g.overtime = { round: 1, possessions: 1, first: 0 };
+  g = advance(g, fake({ reason: "touchdown", yards: 10, duration: 4 }));
+  assert.equal(g.final, true);
+  assert.deepEqual(g.score, [3, 6]);
+});
+test("film notes cite actual exchanges and release events", async () => {
+  const { analyzeFilm } = await import("./film-analysis.js");
+  const f = simulateSeed(
+    15,
+    defaults().find((p) => p.name === "Dive"),
+  );
+  const notes = analyzeFilm(f);
+  assert.ok(notes.length);
+  assert.ok(notes.every((n) => n.title && n.detail));
+  assert.ok(!notes.some((n) => n.title === "Quarterback decision"));
+});
+test("formation switching restores personnel roles and flags a single forward motion segment", () => {
+  const p = applyFormation(applyFormation(play(), "Empty"), "Spread");
+  assert.equal(p.slots[9].pos, "RB");
+  p.slots[8].motion = [[0, 0]];
+  assert.ok(validateFormation(p).some((x) => x.includes("toward")));
+});
+
+test("pursuit solves a meeting point without oscillating between the runner and an unreachable lead", async () => {
+  const { pursuitPoint } = await import("./tactics.js");
+  const d = { x: 4, y: 8, energy: 1, ratings: { speed: 70, pursuit: 90 } };
+  const r = { x: 0, y: 0, vx: 0, vy: 5 };
+  const p = pursuitPoint(d, r),
+    t = p.y / 5,
+    speed = 3.3 + 70 * 0.058;
+  assert.ok(t > 0 && t < 2);
+  assert.ok(Math.abs(Math.hypot(p.x - d.x, p.y - d.y) / speed - t) < 0.00001);
+  const slow = { x: 0, y: -8, energy: 1, ratings: { speed: 20, pursuit: 90 } };
+  assert.deepEqual(pursuitPoint(slow, { x: 0, y: 0, vx: 0, vy: 10 }), {
+    x: 0,
+    y: 0,
+  });
+});
+
+test("deep defenders preserve shell depth over an underneath route", async () => {
+  const { coverageTarget } = await import("./tactics.js");
+  const d = {
+    id: "D10",
+    x: 0,
+    y: 14,
+    zone: [0, 27],
+    assignment: "deep",
+    ratings: { awareness: 80 },
+  };
+  const p = coverageTarget(
+    d,
+    [{ id: "H", assignment: "route", x: 2, y: 5, vx: 0, vy: 3 }],
+    [d],
+    { x: 0, y: -5 },
+  );
+  assert.ok(p.y >= 27);
+});
+test("a quarterback may operate in his own end zone without an instant safety", () => {
+  const f = simulateSeed(14, play(), call(), 1);
+  assert.ok(f.result.duration > 0.6);
+});
+test("short-field pre-snap defenders stay inside the end line", () => {
+  const f = simulateSeed(14, play(), call(), 99);
+  assert.ok(
+    f.frames
+      .filter((f) => f.t <= 0)
+      .every((f) => f.players.slice(11).every((p) => p[1] <= 11)),
+  );
+});
+
+test("called running concepts never fall through into the passing progression", () => {
+  for (const p of defaults().filter((p) =>
+    ["run", "qb", "option", "triple"].includes(p.kind),
+  )) {
+    const f = simulate({
+      seed: 16,
+      offense: TEAMS[0],
+      defense: TEAMS[1],
+      play: p,
+      call: call(),
+      penalties: false,
+    });
+    assert.equal(f.result.pass, false, p.name);
+    assert.ok(!f.events.some((e) => e.type === "throw"), p.name);
+  }
+});
+
+test("active athletes accumulate stamina-dependent fatigue while the bench recovers", () => {
+  let g = newGame();
+  g.phase = "scrimmage";
+  g.fatigue = { bench: 0.6 };
+  const f = fake({ duration: 6, yards: 0 });
+  f.players = [
+    { athleteId: "active", ratings: { stamina: 45 } },
+    { athleteId: "fit", ratings: { stamina: 95 } },
+  ];
+  for (let n = 0; n < 8; n++) g = advance(g, f);
+  assert.ok(g.fatigue.active > 0.15);
+  assert.ok(g.fatigue.active > g.fatigue.fit);
+  assert.ok(g.fatigue.bench < 0.1);
+  const rested = timeout(g, g.possession);
+  assert.ok(rested.fatigue.active < g.fatigue.active);
+});
+
+test("two coaches choosing the same school have independent fatigue and roster IDs", () => {
+  const g = newGame(1, 1, 100);
+  assert.equal(
+    new Set(g.teams.flatMap((t) => t.roster.map((p) => p.id))).size,
+    88,
+  );
+  const p = play();
+  p.slots[10].athlete = TEAMS[1].roster[0].id;
+  const away = lineup(g.teams[1], p.slots);
+  assert.equal(away[10].sourceId, TEAMS[1].roster[0].id);
+  assert.notEqual(away[10].id, g.teams[0].roster[0].id);
+  assert.deepEqual(away[10].ratings, g.teams[0].roster[0].ratings);
+});

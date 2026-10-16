@@ -1,3 +1,6 @@
+import { kickSimulation as simulateKick } from "./special-teams.js";
+import { previewFilm } from "./football.js";
+import { enrichStatistics } from "./statistics.js";
 import {
   VERSION,
   TEAMS,
@@ -7,6 +10,7 @@ import {
   defaults,
   defenseDefaults,
   selectDefense,
+  separateAwayRoster,
   hash,
 } from "./data.js";
 import { simulate } from "./engine.js";
@@ -20,7 +24,10 @@ export function newGame(home = 1, away = 0, seed = Date.now(), rules = {}) {
   return {
     version: VERSION,
     seed: seed >>> 0,
-    teams: [clone(TEAMS[home]), clone(TEAMS[away])],
+    teams: [
+      clone(TEAMS[home]),
+      home === away ? separateAwayRoster(TEAMS[away]) : clone(TEAMS[away]),
+    ],
     score: [0, 0],
     quarter: 1,
     clock: rules.quarter || 720,
@@ -79,14 +86,23 @@ function kickoff(g, kicker, safety = false) {
   first(g);
 }
 function endPeriod(g) {
-  if (g.clock > 0 || g.phase === "try" || g.final || g.overtime) return;
+  if (
+    g.clock > 0 ||
+    g.phase === "try" ||
+    g.final ||
+    g.overtime ||
+    g.untimedDown
+  )
+    return;
   if (g.quarter === 2) {
+    for (const id of Object.keys(g.fatigue)) g.fatigue[id] *= 0.2;
     g.quarter = 3;
     g.clock = g.rules.quarter;
     g.timeouts = [3, 3];
     kickoff(g, g.openingReceiver);
     g.last += " • Halftime";
   } else if (g.quarter < 4) {
+    for (const id of Object.keys(g.fatigue)) g.fatigue[id] *= 0.6;
     g.quarter++;
     g.clock = g.rules.quarter;
     g.running = false;
@@ -133,12 +149,42 @@ export function timeout(game, side) {
   const g = clone(game);
   if (g.final || g.timeouts[side] <= 0) return g;
   g.timeouts[side]--;
+  for (const id of Object.keys(g.fatigue))
+    g.fatigue[id] = Math.max(0, g.fatigue[id] - 0.08);
   g.running = false;
   g.playClock = 25;
   g.last = `${g.teams[side].school} timeout`;
   return g;
 }
 export function advance(game, film, tempo = "normal") {
+  let applied = film;
+  const r = film.result,
+    p = r.penalty;
+  if (
+    p &&
+    ((p.side === 0 &&
+      (r.turnover ||
+        (game.down === 4 && r.reason === "incomplete") ||
+        r.yards <= -p.yards)) ||
+      (p.side === 1 &&
+        !r.turnover &&
+        r.complete &&
+        r.yards >= Math.max(p.yards, game.distance)))
+  ) {
+    applied = clone(film);
+    applied.result.declinedPenalty = p.name;
+    applied.result.penalty = null;
+  }
+  const next = enrichStatistics(
+    advanceCore(game, applied, tempo),
+    game,
+    applied,
+  );
+  if (applied.result.declinedPenalty)
+    next.last += " • " + applied.result.declinedPenalty + " declined";
+  return next;
+}
+function advanceCore(game, film, tempo = "normal") {
   const g = clone(game),
     r = film.result,
     side = g.possession,
@@ -146,10 +192,12 @@ export function advance(game, film, tempo = "normal") {
     s = g.stats[side],
     oldBall = g.ball,
     wasTry = g.phase === "try";
+  const untimed = !!g.untimedDown;
+  g.untimedDown = false;
   g.seq++;
   if (g.final) throw Error("Game has ended");
   const runoff =
-    g.running && !g.overtime && !wasTry
+    g.running && !g.overtime && !wasTry && !untimed
       ? Math.max(
           0,
           ({ hurry: 4, normal: 22, chew: 38 }[tempo] ?? 22) -
@@ -157,7 +205,7 @@ export function advance(game, film, tempo = "normal") {
         )
       : 0;
   g.readyDelay = 0;
-  if (runoff >= g.clock && !g.overtime && !wasTry) {
+  if (runoff >= g.clock && !g.overtime && !wasTry && !untimed) {
     g.clock = 0;
     g.last = "Period ended before the snap";
     endPeriod(g);
@@ -165,16 +213,23 @@ export function advance(game, film, tempo = "normal") {
   }
   if (!g.overtime && !wasTry)
     g.clock = Math.max(0, g.clock - runoff - Math.ceil(r.duration));
+  const activeIds = new Set((film.players || []).map((p) => p.athleteId));
   for (const id of Object.keys(g.fatigue))
-    g.fatigue[id] = Math.max(0, g.fatigue[id] - 0.035);
+    g.fatigue[id] = Math.max(
+      0,
+      g.fatigue[id] -
+        (activeIds.has(id) ? 0.008 + runoff * 0.00025 : 0.07 + runoff * 0.001),
+    );
   for (const p of film.players || [])
     g.fatigue[p.athleteId] = clamp(
       (g.fatigue[p.athleteId] || 0) +
-        r.duration * 0.004 * (1.4 - p.ratings?.stamina / 150 || 1),
+        r.duration * 0.0065 * (1.6 - (p.ratings?.stamina ?? 60) / 120),
       0,
       1,
     );
   let text = "";
+  if (r.penalty && !r.penalty.loss && g.clock === 0 && !g.overtime)
+    g.untimedDown = true;
   if (r.penalty) {
     const p = r.penalty;
     const delta =
@@ -209,7 +264,20 @@ export function advance(game, film, tempo = "normal") {
     r.reason === "missed_field_goal" ||
     r.reason === "extra_point"
   ) {
-    if (r.returnTD) {
+    if (r.retained) {
+      g.ball = r.retainedBall;
+      g.phase = "scrimmage";
+      g.running = false;
+      g.playClock = 25;
+      if (r.onside || g.ball >= g.line) first(g);
+      else {
+        g.down++;
+        g.distance = Math.round((g.line - g.ball) * 10) / 10;
+        if (g.down > 4) flip(g, 100 - g.ball);
+      }
+      text = r.onside ? "ONSIDE KICK RECOVERED" : "Blocked kick recovered";
+      if (g.overtime) otEnd(g);
+    } else if (r.returnTD) {
       g.score[other] += 6;
       g.possession = other;
       g.phase = "try";
@@ -280,7 +348,7 @@ export function advance(game, film, tempo = "normal") {
         g.ball = 97;
         first(g);
       } else if (g.overtime) otEnd(g);
-      else flip(g, 100 - (oldBall + r.yards));
+      else flip(g, r.touchback ? 20 : 100 - (oldBall + r.yards));
     } else if (r.reason === "touchdown") {
       g.score[side] += 6;
       g.phase = "try";
@@ -335,6 +403,21 @@ export function advance(game, film, tempo = "normal") {
     g.playClock = 25;
     text += " • Defense calls timeout";
   }
+  if (g.phase === "try") {
+    const scoring = g.possession,
+      lead = g.score[scoring] - g.score[1 - scoring];
+    if (
+      (g.overtime?.possessions === 1 && lead > 0) ||
+      (!g.overtime &&
+        g.quarter === 4 &&
+        g.clock === 0 &&
+        (lead > 0 || lead < -2))
+    ) {
+      g.final = true;
+      g.phase = "final";
+      text += " • FINAL";
+    }
+  }
   g.last = text;
   g.history.push({
     seq: g.seq,
@@ -350,197 +433,80 @@ export function advance(game, film, tempo = "normal") {
   endPeriod(g);
   return g;
 }
-export function simulateKick(g, type, seed) {
-  const random = rng(seed),
-    team = g.teams[g.possession],
-    opponent = g.teams[1 - g.possession],
-    k = team.roster.find((p) => p.pos === (type === "punt" ? "P" : "K")),
-    kickoff = g.phase === "kickoff",
-    start = g.ball,
-    accuracy = k.ratings.kicking,
-    range = type === "punt" ? k.ratings.punting : accuracy;
-  const distance = kickoff
-    ? 43 + range * 0.22 + (random() - 0.5) * 10
-    : type === "punt"
-      ? 24 + range * 0.22 + (random() - 0.5) * 12
-      : 100 - start + 17;
-  const lateral = (random() - 0.5) * (100 - accuracy) * 0.6,
-    good = distance < 18 + range * 0.42 && Math.abs(lateral) < 35 / 9,
-    landing = start + distance,
-    flightTime = type === "punt" || kickoff ? 3.6 : 1.6;
-  const players = Array.from({ length: 22 }, (_, i) => {
-    const source =
-      i === 0 ? k : (i < 11 ? team : opponent).roster[i < 11 ? i : i - 11];
-    return {
-      id: `K${i}`,
-      athleteId: source.id,
-      name: source.name,
-      number: source.number,
-      pos: source.pos,
-      side: i < 11 ? 0 : 1,
-      ratings: source.ratings,
-    };
-  });
-  const pos = players.map((p, i) => ({
-      x: i === 0 ? 0 : i < 11 ? (i - 5) * 4 : i === 21 ? lateral : (i - 16) * 4,
-      y:
-        i === 0
-          ? kickoff
-            ? 0
-            : type === "punt"
-              ? -12
-              : -7
-          : i < 11
-            ? kickoff
-              ? 0
-              : -1
-            : i === 21
-              ? Math.min(98, landing) - start
-              : 15 + (i % 3) * 10,
-      vx: 0,
-      vy: 0,
-      state: "ready",
-    })),
-    frames = [],
-    events = [{ t: 0, type: "kick", text: type.replaceAll("_", " ") }];
-  let football = { x: 0, y: 0, z: 0 },
-    caught = false,
-    dead = false,
-    returnY = landing,
-    carrier = -1,
-    t = 0;
-  for (let n = 0; n < 30 * 17 && !dead; n++) {
-    t = n / 30;
-    const u = clamp((t - 0.25) / flightTime, 0, 1),
-      launch = kickoff ? 0 : type === "punt" ? -12 : -7;
-    if (!caught)
-      football = {
-        x: lateral * u,
-        y: launch + (distance - launch) * u,
-        z: Math.sin(Math.PI * u) * (kickoff || type === "punt" ? 15 : 8),
-      };
-    if (u === 1 && !caught) {
-      if (type === "field_goal" || type === "extra_point" || landing >= 100) {
-        dead = true;
-      } else {
-        caught = true;
-        carrier = 21;
-        pos[21].x = lateral;
-        pos[21].y = landing - start;
-        events.push({ t, type: "return", text: "Return begins" });
-      }
-    }
-    for (let i = 0; i < 22; i++) {
-      const p = pos[i],
-        s = players[i].ratings.speed * 0.05 + 4;
-      if (i === 0 && t < 0.5) {
-        p.state = "kick";
-        continue;
-      }
-      let target =
-        i < 11
-          ? caught
-            ? pos[21]
-            : { x: lateral, y: distance }
-          : caught
-            ? { x: pos[21].x, y: pos[21].y - 3 }
-            : { x: p.x, y: p.y };
-      if (caught && i >= 11 && i < 21) {
-        const threat = pos
-          .slice(0, 11)
-          .reduce((a, b) =>
-            Math.hypot(a.x - p.x, a.y - p.y) < Math.hypot(b.x - p.x, b.y - p.y)
-              ? a
-              : b,
-          );
-        target = threat;
-        if (Math.hypot(threat.x - p.x, threat.y - p.y) < 1.3) {
-          p.state = "block";
-          const power = players[i].ratings.runBlock;
-          threat.vx *= 1 - power / 130;
-          threat.vy *= 1 - power / 130;
-          threat.y += 0.035;
-        }
-      }
-      if (i === 21 && caught) target = { x: clamp(p.x, -23, 23), y: -start };
-      const dx = target.x - p.x,
-        dy = target.y - p.y,
-        l = Math.hypot(dx, dy) || 1;
-      p.vx = (dx / l) * s;
-      p.vy = (dy / l) * s;
-      p.x += p.vx / 30;
-      p.y += p.vy / 30;
-      p.state = "run";
-    }
-    if (caught) {
-      football = { x: pos[21].x, y: pos[21].y, z: 1 };
-      returnY = start + pos[21].y;
-      if (
-        pos
-          .slice(0, 11)
-          .some((p) => Math.hypot(p.x - pos[21].x, p.y - pos[21].y) < 1) ||
-        Math.abs(pos[21].x) > 26.67 ||
-        returnY <= 0
-      ) {
-        dead = true;
-        pos[21].state = "down";
-      }
-    }
-    if (n % 3 === 0 || dead)
-      frames.push({
-        t,
-        players: pos.map((p) => [p.x, p.y, p.vx, p.vy, p.state]),
-        ball: [football.x, football.y, football.z],
-        carrier,
-      });
-  }
-  let reason = kickoff
-    ? "kickoff"
-    : type === "punt"
-      ? "punt"
-      : type === "extra_point"
-        ? "extra_point"
-        : good
-          ? "field_goal"
-          : "missed_field_goal";
-  const nextBall = landing >= 100 ? 20 : clamp(100 - returnY, 1, 99);
-  return {
-    version: VERSION,
-    seed,
-    ball: start,
-    players,
-    frames,
-    events,
-    offense: team,
-    defense: opponent,
-    play: { name: type.replaceAll("_", " "), slots: [] },
-    call: { name: "Special teams", slots: [] },
-    result: {
-      reason,
-      good,
-      yards: 0,
-      duration:
-        landing >= 100 || ["field_goal", "extra_point"].includes(type)
-          ? flightTime
-          : Math.max(flightTime, t),
-      nextBall,
-      returnTD: caught && returnY <= 0,
-      turnover: false,
-      version: VERSION,
-      seed,
-    },
-  };
-}
+export { kickSimulation as simulateKick } from "./special-teams.js";
 export function runSnap(g, p, seed, penalties = true) {
-  if (g.phase === "kickoff") return simulateKick(g, "kickoff", seed);
+  if (g.final) throw Error("Game has ended");
+  if (g.phase === "try" && typeof p === "string" && p !== "extra_point")
+    throw Error("Choose a two-point play or kick PAT");
+  if (
+    g.phase === "try" &&
+    p === "extra_point" &&
+    g.overtime?.round >= g.rules.otTwoFrom
+  )
+    throw Error("A two-point attempt is required this overtime round");
+  if (g.phase !== "kickoff" && ["onside", "kickoff"].includes(p))
+    throw Error(
+      "A kickoff is only available after a score or at the start of a half",
+    );
+  if (g.phase !== "try" && p === "extra_point")
+    throw Error("An extra point is only available after a touchdown");
+  const runoff =
+    g.running && !g.overtime && !g.untimedDown && g.phase === "scrimmage"
+      ? Math.max(
+          0,
+          ({ hurry: 4, normal: 22, chew: 38 }[
+            typeof p === "object" ? p.tempo : "normal"
+          ] ?? 22) - (g.readyDelay || 0),
+        )
+      : 0;
+  if (
+    !g.overtime &&
+    !g.untimedDown &&
+    g.phase === "scrimmage" &&
+    runoff >= g.clock
+  ) {
+    const play = typeof p === "object" ? p : defaults()[0],
+      call = selectDefense(
+        g.defenses[1 - g.possession],
+        { receivers: play.slots.filter((s) => s.pos === "WR").length },
+        g,
+        seed ^ 1847,
+      ),
+      f = previewFilm(
+        g.teams[g.possession],
+        g.teams[1 - g.possession],
+        play,
+        call,
+        g.ball,
+        g.fatigue,
+      );
+    f.frames = [{ ...f.frames.at(-1), t: 0 }];
+    f.preview = false;
+    f.version = VERSION;
+    f.seed = seed;
+    f.events = [{ t: 0, type: "clock", text: "Period ends before the snap" }];
+    f.result = {
+      reason: "period_expired",
+      duration: 0,
+      yards: 0,
+      turnover: false,
+      seed,
+      version: VERSION,
+    };
+    return f;
+  }
+  if (g.phase === "kickoff")
+    return simulateKick(g, p === "onside" ? "onside" : "kickoff", seed);
   if (typeof p === "string") return simulateKick(g, p, seed);
-  const def = selectDefense(
-    g.defenses[1 - g.possession],
-    { receivers: p.slots.filter((s) => s.pos === "WR").length },
-    g,
-    seed ^ 1847,
-  );
-  return simulate({
+  const def =
+    g.practiceCall ||
+    selectDefense(
+      g.defenses[1 - g.possession],
+      { receivers: p.slots.filter((s) => s.pos === "WR").length },
+      g,
+      seed ^ 1847,
+    );
+  const film = simulate({
     seed,
     offense: g.teams[g.possession],
     defense: g.teams[1 - g.possession],
@@ -550,31 +516,75 @@ export function runSnap(g, p, seed, penalties = true) {
     fatigue: g.fatigue,
     penalties,
   });
+  film.situation = {
+    down: g.down,
+    distance: g.distance,
+    ball: g.ball,
+    quarter: g.quarter,
+    clock: g.clock,
+  };
+  return film;
 }
 export function aiPlay(g, book = defaults()) {
-  if (g.phase === "kickoff") return "kickoff";
+  if (g.phase === "kickoff")
+    return g.quarter === 4 &&
+      g.clock < 120 &&
+      g.score[g.possession] < g.score[1 - g.possession]
+      ? "onside"
+      : "kickoff";
   if (g.phase === "try")
     return g.overtime?.round >= g.rules.otTwoFrom
       ? book.find((p) => p.kind === "run")
       : "extra_point";
+  const side = g.possession,
+    margin = g.score[side] - g.score[1 - side];
+  const urgent = g.quarter === 4 && g.clock < 150 && margin < 0;
   if (g.down === 4) {
-    if (g.ball > 65) return "field_goal";
-    if (g.ball < 65 && g.distance > 2) return "punt";
+    const kicker = g.teams[side].roster.find((p) => p.pos === "K");
+    const expectedRange = 20 + (kicker?.ratings.kicking || 60) * 0.43;
+    const distance = 117 - g.ball;
+    if (distance < expectedRange && (!urgent || margin >= -3))
+      return "field_goal";
+    if (!urgent && !g.overtime && g.ball < 65 && g.distance > 2) return "punt";
   }
   const r = rng(hash(`${g.seed}-${g.seq}`));
   let a = book.filter((p) => !["spike", "kneel"].includes(p.kind));
   if (g.distance > 8 && g.down >= 3) a = a.filter((p) => p.kind === "pass");
+  const availableKneels = 5 - g.down;
+  const stoppages = g.timeouts[1 - side];
   if (
-    g.clock < 100 &&
     g.quarter === 4 &&
-    g.score[g.possession] > g.score[1 - g.possession] &&
+    margin > 0 &&
+    g.down < 4 &&
+    g.clock <= Math.max(0, availableKneels - stoppages) * 39 &&
+    availableKneels > stoppages
+  ) {
+    const kneel = book.find((p) => p.kind === "kneel");
+    if (kneel) return { ...clone(kneel), tempo: "chew" };
+  }
+  if (
+    urgent &&
+    g.clock < 18 &&
+    g.running &&
+    g.timeouts[side] === 0 &&
     g.down < 4
-  )
-    return book.find((p) => p.kind === "kneel") || a[0];
+  ) {
+    const spike = book.find((p) => p.kind === "spike");
+    if (spike) return { ...clone(spike), tempo: "hurry" };
+  }
   const scheme = g.teams[g.possession].id;
   const weights = a.map((p) => {
     let w = 1;
-    if (scheme === 0 && p.kind === "run") w = 4;
+    if (scheme === 0 && p.kind === "run")
+      w = [
+        "Power Right",
+        "Counter Left",
+        "Trap",
+        "Dive",
+        "Inside Zone",
+      ].includes(p.name)
+        ? 9
+        : 2;
     if (scheme === 1 && p.kind === "pass") w = 4;
     if (scheme === 2 && ["option", "triple"].includes(p.kind)) w = 7;
     if (
@@ -593,10 +603,39 @@ export function aiPlay(g, book = defaults()) {
       ["Stick", "Drive", "Mesh", "Play Action Cross"].includes(p.name)
     )
       w = 6;
+    const recent = g.history
+      .filter(
+        (h) =>
+          h.offense === g.possession && h.play === p.name && !h.result.penalty,
+      )
+      .slice(-6);
+    if (recent.length >= 2) {
+      const observed =
+        recent.reduce(
+          (n, h) =>
+            n +
+            (h.result.turnover
+              ? -8
+              : h.result.reason === "incomplete"
+                ? 0
+                : h.result.yards),
+          0,
+        ) / recent.length;
+      w *= clamp(0.8 + observed * 0.06, 0.35, 1.7);
+    }
+    if (
+      g.down >= 2 &&
+      g.distance < 3 &&
+      ["Dive", "Power Right", "QB Power"].includes(p.name)
+    )
+      w *= 1.8;
     return w;
   });
   let v = r() * weights.reduce((a, b) => a + b, 0);
-  return a[weights.findIndex((w) => (v -= w) < 0)] || a[0];
+  const chosen = clone(a[weights.findIndex((w) => (v -= w) < 0)] || book[0]);
+  if (urgent) chosen.tempo = "hurry";
+  else if (g.quarter === 4 && margin > 0) chosen.tempo = "chew";
+  return chosen;
 }
 export function autoGame(g) {
   let n = 0;

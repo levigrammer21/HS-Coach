@@ -1,4 +1,10 @@
 import {
+  preSnapFrames,
+  protectionPlan,
+  evaluateLogic,
+  smoothRoute,
+} from "./football.js";
+import {
   VERSION,
   clone,
   clamp,
@@ -6,10 +12,11 @@ import {
   lineup,
   validateFormation,
 } from "./data.js";
+import { coverageTarget, pursuitPoint, runningLane } from "./tactics.js";
 export const DT = 1 / 30;
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const pt = (p) => ({ x: p[0], y: p[1] });
-const round = (x) => Math.round(x * 100) / 100;
+const round = (x) => Math.round(x * 100) / 100 || 0;
 export function simulate({
   seed = 1,
   offense,
@@ -51,11 +58,27 @@ export function simulate({
       energy: 1 - (fatigue[p.id] || 0) * 0.35,
     })),
   ];
+  for (const p of players)
+    if (p.curved && p.path?.length) p.path = smoothRoute([p.x, p.y], p.path);
+  const blockPlan = protectionPlan(
+      players.slice(0, 11),
+      players.slice(11),
+      play,
+    ),
+    observation = [],
+    logicSeen = new Set(),
+    production = {};
+  const credit = (p, key, n = 1) => {
+    if (!p) return;
+    const a = (production[p.athleteId] ||= {});
+    a[key] = (a[key] || 0) + n;
+  };
   const os = players.slice(0, 11),
     ds = players.slice(11),
     qb = os.find((p) => p.id === "QB"),
     byId = (id) => os.find((p) => p.id === id),
     goal = 100 - ball;
+  for (const p of ds) p.y = Math.min(p.y, goal + 5);
   let t = 0,
     carrier = qb,
     flight = null,
@@ -65,28 +88,44 @@ export function simulate({
     intercepted = false,
     handed = false,
     pitched = false,
+    escaping = false,
     dead = false,
     result = null,
+    meshAt = play.mesh ?? (play.concept === "Draw" ? 1.65 : 0.75),
     nextRead = play.release || 1.5,
     readIndex = 0;
   let football = { x: qb.x, y: qb.y, z: 1 },
+    activeEngaged = new Set(),
     pairs = new Map(),
     tackles = new Map(),
     holding = null,
     passer = null,
-    receiver = null;
+    receiver = null,
+    catchY = null,
+    inReturnEndzone = false;
   const event = (type, text, extra = {}) =>
     events.push({ t: round(t), type, text, ...extra });
   const finish = (reason, p = carrier) => {
     if (dead) return;
+    if (
+      p &&
+      ["tackle", "sack", "out", "kneel", "forward_progress"].includes(reason) &&
+      ((p.side === 0 && p.y <= -ball) ||
+        (p.side === 1 && p.y >= goal && !inReturnEndzone))
+    )
+      reason = "safety";
     dead = true;
     result = {
       reason,
-      yards: round(p?.y || 0),
+      yards: round(
+        reason === "touchdown" ? (p?.side === 1 ? -ball : goal) : p?.y || 0,
+      ),
       x: round(p?.x || 0),
       duration: round(t),
       complete,
+      catchY,
       intercepted: intercepted && reason !== "fumble",
+      touchback: intercepted && inReturnEndzone && p?.y >= goal,
       pass: thrown,
       carrier: p?.athleteId || null,
       passer,
@@ -116,7 +155,8 @@ export function simulate({
         round(p.y),
         round(p.vx),
         round(p.vy),
-        p.state,
+        p.poseUntil > t ? p.pose : p.state,
+        0,
       ]),
       ball: [round(football.x), round(football.y), round(football.z)],
       carrier: carrier ? players.indexOf(carrier) : -1,
@@ -135,15 +175,26 @@ export function simulate({
       dy = target.y - p.y,
       len = Math.hypot(dx, dy),
       speed = (3.3 + p.ratings.speed * 0.058) * p.energy * mult,
-      desiredX = len > 0.15 ? (dx / len) * speed : 0,
-      desiredY = len > 0.15 ? (dy / len) * speed : 0,
+      approach = Math.min(
+        speed,
+        Math.sqrt(2 * (7 + p.ratings.acceleration * 0.1) * len),
+      ),
+      desiredX = len > 0.08 ? (dx / len) * approach : 0,
+      desiredY = len > 0.08 ? (dy / len) * approach : 0,
       acc = 7 + p.ratings.acceleration * 0.1,
       turn = 0.3 + p.ratings.agility * 0.009;
     p.vx += clamp(desiredX - p.vx, -acc * DT * turn, acc * DT * turn);
     p.vy += clamp(desiredY - p.vy, -acc * DT * turn, acc * DT * turn);
     p.x += p.vx * DT;
     p.y += p.vy * DT;
-    p.state = p.vy < -0.8 && p.side === 1 && !thrown ? "backpedal" : "run";
+    p.state =
+      p.vy > 0.8 &&
+      p.side === 1 &&
+      !thrown &&
+      ["man", "zone", "deep"].includes(p.assignment) &&
+      t < 1.5
+        ? "backpedal"
+        : "run";
   };
   const route = (p) => {
     let path = p.adjustedPath || p.path || [];
@@ -177,6 +228,8 @@ export function simulate({
     )
       return move(p, { x: p.x, y: p.y }, 0.2);
     if (t < (p.delay || 0)) return move(p, { x: p.x, y: p.y }, 0.4);
+    if (play.fake && p.id === "RB" && t < 0.7)
+      return move(p, { x: qb.x + 1, y: qb.y }, 0.8);
     const target = path[Math.min(p.node, path.length - 1)];
     if (!target) return move(p, { x: p.x, y: p.y });
     if (dist(p, pt(target)) < 0.7 && p.node < path.length - 1) p.node++;
@@ -194,34 +247,38 @@ export function simulate({
       if (dist(p, target) < 1.2) p.node++;
     } else target = { x: clamp(p.x, -22, 22), y: p.y + 15 * dir };
     const enemies = p.side === 0 ? ds : os;
-    for (const e of enemies) {
-      const dy = (e.y - p.y) * dir;
-      if (dy > 0 && dy < 5 && Math.abs(e.x - p.x) < 2) {
-        target = {
-          x: clamp(target.x + (p.x >= e.x ? 1 : -1) * 3, -25, 25),
-          y: target.y,
-        };
-        break;
-      }
-    }
+    target = runningLane(p, target, enemies, activeEngaged);
     move(p, target);
   };
-  for (const p of os) {
-    if (p.shift?.length) {
-      const z = p.shift.at(-1);
-      p.x = z[0];
-      p.y = z[1];
-    }
-    if (p.motion?.length) {
-      const z = p.motion.at(-1);
-      p.x = z[0];
-      p.y = z[1];
-      p.vx = (z[0] > (p.motion.at(-2)?.[0] ?? p.x) ? 1 : -1) * 3;
-    }
-  }
+  const preSlots = [...play.slots, ...call.slots].map((s, i) =>
+    i < 11 ? s : { ...s, y: Math.min(s.y, goal + 5) },
+  );
+  const pre = preSnapFrames(players, preSlots);
+  frames.push(...pre);
+  const preEnd = pre.at(-1);
+  players.forEach((p, i) => {
+    if (i >= 11 && Math.abs(preEnd.players[i][0] - p.x) > 1)
+      p.followedMotion = p.target;
+    p.x = preEnd.players[i][0];
+    p.y =
+      i >= 11 ? Math.min(preEnd.players[i][1], goal + 5) : preEnd.players[i][1];
+    p.vx = preEnd.players[i][2];
+    p.vy = preEnd.players[i][3];
+  });
+  football = { x: qb.x, y: qb.y, z: 1 };
+  for (const p of os)
+    if (p.motion?.length)
+      event("motion", p.id + " completes motion before the snap");
   snapshot();
   event("snap", `${offense.school}: ${play.name} vs ${call.name}`);
   const issues = validateFormation(play);
+  if (
+    os.filter((p) => Math.abs(p.y) < 0.4 && p.number >= 50 && p.number <= 79)
+      .length < 5
+  )
+    issues.push(
+      "Five linemen must wear numbers 50–79 in a scrimmage formation.",
+    );
   if (issues.length && penalties) {
     finish("penalty");
     result.penalty = {
@@ -246,10 +303,12 @@ export function simulate({
     return packageResult();
   }
   function throwPass(target) {
-    const rush = ds.reduce((a, b) => (dist(qb, a) < dist(qb, b) ? a : b));
+    const rush = ds
+      .filter((d) => !activeEngaged.has(d.id))
+      .reduce((a, b) => (dist(qb, a) < dist(qb, b) ? a : b), ds[0]);
     const pressure = clamp((4 - dist(qb, rush)) / 4, 0, 1),
       distance = dist(qb, target),
-      time = clamp(distance / (17 + qb.ratings.throwPower * 0.15), 0.35, 2),
+      time = clamp(distance / (17 + qb.ratings.throwPower * 0.15), 0.35, 3),
       err =
         (100 - qb.ratings.accuracy) * 0.025 * (1 + distance / 20) +
         pressure * 2;
@@ -270,6 +329,14 @@ export function simulate({
         travel = 0;
       }
     }
+    const maxRange = 18 + qb.ratings.throwPower * 0.42;
+    const aimDistance = Math.hypot(tx - qb.x, ty - qb.y);
+    if (aimDistance > maxRange) {
+      const scale = maxRange / aimDistance;
+      tx = qb.x + (tx - qb.x) * scale;
+      ty = qb.y + (ty - qb.y) * scale;
+      event("range", "Throw reaches the quarterback’s arm limit");
+    }
     const x = tx + (random() - 0.5) * err * 1.35,
       y = ty + (random() - 0.5) * err * 1.35;
     flight = {
@@ -280,10 +347,30 @@ export function simulate({
       type: "pass",
       target: target.id,
     };
+    if (
+      penalties &&
+      y > 0 &&
+      os.some(
+        (p) =>
+          ["C", "G", "T"].includes(p.pos) &&
+          p.y > 2 &&
+          !["pass", "slide"].includes(p.assignment),
+      )
+    ) {
+      holding = {
+        name: "Ineligible receiver downfield",
+        side: 0,
+        yards: 5,
+        repeat: true,
+      };
+      event("flag", "Ineligible lineman beyond the expanded neutral zone");
+    }
     carrier = null;
     thrown = true;
     passer = qb.athleteId;
     qb.state = "throw";
+    qb.pose = "throw";
+    qb.poseUntil = t + 0.35;
     event(
       "throw",
       `#${qb.number} reads ${target.id}; pressure ${Math.round(pressure * 100)}%`,
@@ -292,7 +379,23 @@ export function simulate({
   }
   for (let step = 1; step <= 30 * 22 && !dead; step++) {
     t = step * DT;
-    const engaged = new Set();
+    observation.push(
+      os.map((p) => ({ id: p.id, x: p.x, y: p.y, vx: p.vx, vy: p.vy })),
+    );
+    if (observation.length > 22) observation.shift();
+    const engaged = (activeEngaged = new Set());
+    // Once possession is declared, eligible receivers stalk the nearest live pursuit threat.
+    if ((handed && play.kind !== "pass") || complete)
+      for (const p of os)
+        if (
+          p !== carrier &&
+          p !== qb &&
+          p.assignment === "route" &&
+          t > meshAt + 0.2
+        ) {
+          p.assignment = "stalk";
+          delete blockPlan[p.id];
+        }
     // Match blocks to nearby threats. Success is local strength/technique versus rush/shed.
     for (const b of os.filter(
       (p) =>
@@ -310,15 +413,31 @@ export function simulate({
           "lead",
           "chip",
           "contain",
+          "stalk",
         ].includes(p.assignment),
     )) {
-      let target;
+      let target = ds.find((d) => d.id === blockPlan[b.id]);
+      if (b.recoverUntil > t) {
+        move(b, carrier || qb, 0.45);
+        continue;
+      }
+      if (b.assignment === "stalk")
+        target = ds
+          .filter((d) => !engaged.has(d.id) && d.y > (carrier?.y ?? 0) - 2)
+          .sort((a, c) => dist(b, a) - dist(b, c))[0];
+      if (b.assignment === "pass" && play.concept === "Draw" && handed)
+        b.assignment = "zone";
       if (
         ["pull", "trap", "lead"].includes(b.assignment) &&
         b.node < (b.path?.length || 0)
       ) {
-        route(b);
-        continue;
+        const last = b.path.at(-1);
+        if (dist(b, pt(last)) < 1.1 || (target && dist(b, target) < 1.25))
+          b.node = b.path.length;
+        else {
+          route(b);
+          continue;
+        }
       }
       if (b.assignment === "chip" && t > 1.2) {
         route(b);
@@ -327,8 +446,12 @@ export function simulate({
       if (b.target && b.target !== "nearest")
         target = ds.find((p) => p.id === b.target);
       const threats = ds.filter(
-        (p) => !engaged.has(p.id) || b.assignment === "double",
+        (p) =>
+          (!engaged.has(p.id) || b.assignment === "double") &&
+          !(p.escapedBlocker === b.id && p.escapeUntil > t),
       );
+      if (target?.escapedBlocker === b.id && target.escapeUntil > t)
+        target = null;
       target =
         target ||
         threats.sort((a, c) => {
@@ -336,7 +459,8 @@ export function simulate({
             dist(b, p) + (b.assignment === "pass" ? Math.max(0, p.y - 7) : 0);
           return cost(a) - cost(c);
         })[0] ||
-        ds[0];
+        null;
+      if (!target) continue;
       const pass = ["pass", "slide"].includes(b.assignment);
       const anchor = pass
         ? {
@@ -362,14 +486,30 @@ export function simulate({
         continue;
       }
       const key = b.id + target.id;
+      if (b.blockTarget !== target.id) {
+        b.blockTarget = target.id;
+        b.blockSince = t;
+      }
       let pair = pairs.get(key);
       if (!pair || t > pair.until) {
+        const partners = os.filter(
+            (q) =>
+              q !== b && blockPlan[q.id] === target.id && dist(q, target) < 1.7,
+          ),
+          help = partners.reduce(
+            (sum, q) => sum + (q.ratings.runBlock + q.ratings.strength) * 0.09,
+            0,
+          );
         const attack =
-            (pass ? b.ratings.passBlock : b.ratings.runBlock) * 0.6 +
-            b.ratings.strength * 0.4,
+            help +
+            ((pass ? b.ratings.passBlock : b.ratings.runBlock) * 0.6 +
+              b.ratings.strength * 0.4) *
+              (0.6 + b.energy * 0.4) +
+            clamp(((b.weight || 210) - (target.weight || 210)) * 0.025, -3, 3),
           defend =
-            (pass ? target.ratings.rush : target.ratings.shed) * 0.65 +
-            target.ratings.strength * 0.35;
+            ((pass ? target.ratings.rush : target.ratings.shed) * 0.65 +
+              target.ratings.strength * 0.35) *
+            (0.6 + target.energy * 0.4);
         pair = {
           until: t + 0.55 + random() * 0.7,
           push: clamp(
@@ -379,6 +519,16 @@ export function simulate({
           ),
         };
         pairs.set(key, pair);
+        credit(b, "blocks");
+        if (partners.length)
+          event(
+            "combo",
+            b.id +
+              " combines with " +
+              partners.map((q) => q.id).join("+") +
+              " on " +
+              target.id,
+          );
         if (penalties && !holding && pair.push < -0.4 && random() < 0.018)
           holding = { name: "Holding", side: 0, yards: 10, repeat: true };
       }
@@ -389,13 +539,62 @@ export function simulate({
       b.y += push * DT;
       target.y += push * DT;
       b.vx = b.vy = target.vx = target.vy = 0;
+      // Match lateral footwork as the defender works around a shoulder. Contact
+      // cannot freeze a pursuit athlete indefinitely, particularly on stalk blocks.
+      const shoulder = Math.sign(target.x - b.x) || Math.sign(target.x) || 1;
+      const blockSkill = pass ? b.ratings.passBlock : b.ratings.runBlock;
+      const shedSkill = pass ? target.ratings.rush : target.ratings.shed;
+      target.x +=
+        shoulder *
+        (0.8 + shedSkill * 0.008 + Math.max(0, -pair.push) * 0.6) *
+        DT;
+      b.x +=
+        ((shoulder * (0.7 + blockSkill * 0.008)) /
+          (1 + (t - b.blockSince) * 0.06)) *
+        DT;
+      if (Math.abs(target.x - b.x) > 1.25) {
+        target.escapedBlocker = b.id;
+        target.escapeUntil = t + 0.75;
+        b.recoverUntil = t + 0.3;
+        engaged.delete(target.id);
+      }
       // Keep pads in contact while allowing a beaten rusher to disengage.
+      if (b.assignment === "double" && t > 1.2 && pair.push > 0.15) {
+        const backer = ds
+          .filter((d) => d.pos === "LB" && !engaged.has(d.id))
+          .sort((a, c) => dist(b, a) - dist(b, c))[0];
+        if (backer) {
+          blockPlan[b.id] = backer.id;
+          event("climb", b.id + " climbs to " + backer.id);
+        }
+      }
+      // A rusher wins the edge through accumulated leverage, not perpetual pad contact.
+      const leverage = dist(b, target);
+      if (
+        t - b.blockSince > (pass ? 2.1 : 2.7) &&
+        leverage > 0.8 &&
+        pair.push < 0.05
+      ) {
+        target.escapedBlocker = b.id;
+        target.escapeUntil = t + 0.85;
+        b.recoverUntil = t + 0.45;
+        engaged.delete(target.id);
+        event("shed", target.id + " sheds " + b.id);
+      }
       if (pair.push < -0.28) {
         target.x += (target.x > b.x ? 1 : -1) * DT * 2.1;
         if (Math.abs(target.x - b.x) > 1.2) engaged.delete(target.id);
       }
     }
     for (const p of os) {
+      if (loose) {
+        move(p, loose, 1);
+        continue;
+      }
+      if (flight?.type === "pitch" && p.id === flight.target) {
+        move(p, flight.to, 0.95);
+        continue;
+      }
       if (engaged.has(p.id) || p.state === "block") continue;
       if (p === carrier && p !== qb) {
         run(p);
@@ -409,23 +608,36 @@ export function simulate({
             break;
           }
           if (play.kind === "spike" && t > 0.15) {
-            thrown=true;passer=qb.athleteId;
+            thrown = true;
+            passer = qb.athleteId;
             finish("incomplete");
             break;
           }
           if (
             ["run", "option", "triple", "rpo", "qb"].includes(play.kind) &&
             !handed &&
-            t > 0.65
+            t > meshAt &&
+            (play.kind === "qb" ||
+              play.exchange === "toss" ||
+              dist(byId(play.runner) || byId("RB"), qb) < 1.5)
           ) {
             const runner = byId(play.runner) || byId("RB"),
-              edge = ds.find((p) => p.pos === play.readDefender) || ds[3];
+              edge =
+                ds
+                  .filter((p) => p.pos === play.readDefender)
+                  .sort((a, b) =>
+                    play.readSide === "left" ? a.x - b.x : b.x - a.x,
+                  )[0] || ds[3];
+            const logic = evaluateLogic(play, { os, ds, qb, t, handed });
             let keep =
               play.kind === "qb" ||
               (["option", "triple"].includes(play.kind) &&
-                edge.x > 0 &&
+                Math.abs(edge.x) < 5 &&
+                edge.vy < -0.5 &&
                 edge.y < 2 &&
                 qb.ratings.decision + random() * 35 > 70);
+            if (logic.some((r) => r.action === "keep")) keep = true;
+            if (logic.some((r) => r.action === "handoff")) keep = false;
             let passRpo =
               play.kind === "rpo" &&
               ds.filter((p) => Math.abs(p.x) < 7 && p.y < 7).length >= 5;
@@ -439,53 +651,149 @@ export function simulate({
               handed = true;
               if (keep) {
                 qb.path = clone(
-                  play.slots[9].path || [
+                  (play.kind === "qb"
+                    ? play.slots[10].path
+                    : (byId("QB").path?.length ? byId("QB").path : null) ||
+                      play.keepPath) || [
                     [8, 0],
                     [15, 20],
                   ],
                 );
                 qb.node = 0;
-                event("read", "Read defender crashes; QB keeps");
+                qb.vy *= 0.25;
+                if (play.kind !== "qb")
+                  edge.keyedRunner = {
+                    id: runner.id,
+                    until: t + 0.18 + (100 - edge.ratings.awareness) * 0.004,
+                  };
+                event(
+                  "read",
+                  play.kind === "qb"
+                    ? "Designed quarterback run"
+                    : "Read defender crashes; QB keeps",
+                );
               } else {
-                carrier = runner;
-                runner.x = qb.x + 1;
-                runner.y = qb.y;
+                if (play.exchange === "toss") {
+                  const duration = clamp(dist(qb, runner) / 12, 0.25, 0.8);
+                  flight = {
+                    from: { x: qb.x, y: qb.y },
+                    to: {
+                      x: runner.x + runner.vx * duration * 0.65,
+                      y: Math.min(
+                        qb.y - 0.2,
+                        runner.y + runner.vy * duration * 0.65,
+                      ),
+                    },
+                    start: t,
+                    duration,
+                    type: "pitch",
+                    target: runner.id,
+                  };
+                  carrier = null;
+                  pitched = true;
+                  event("pitch", "QB tosses to #" + runner.number);
+                } else carrier = runner;
+                // The mesh transfers possession only when the players actually meet.
+
                 runner.node = 0;
-                event("handoff", `Mesh to #${runner.number}`);
+                if (play.exchange !== "toss")
+                  event("handoff", `Mesh to #${runner.number}`);
               }
             }
           }
           if (carrier === qb) {
-            if (handed && play.kind !== "pass") {
+            if ((handed && play.kind !== "pass") || escaping) {
               run(qb);
               if (
                 play.kind === "triple" &&
                 !pitched &&
-                t > 1.2 &&
-                ds.some((p) => dist(p, qb) < 3)
+                t > meshAt + 0.2 &&
+                ds.some((p) => !engaged.has(p.id) && dist(p, qb) < 3)
               ) {
                 const rb = byId("RB");
                 if (dist(rb, qb) < 8) {
-                  carrier = rb;
                   pitched = true;
-                  event("pitch", "Pitch to the trailing back");
+                  const duration = clamp(dist(rb, qb) / 12, 0.25, 0.65);
+                  flight = {
+                    from: { x: qb.x, y: qb.y },
+                    to: {
+                      x: rb.x + rb.vx * duration * 0.6,
+                      y: Math.min(qb.y - 0.25, rb.y + rb.vy * duration * 0.6),
+                    },
+                    start: t,
+                    duration,
+                    type: "pitch",
+                    target: rb.id,
+                  };
+                  carrier = null;
+                  event("pitch", "QB pitches behind him to the trailing back");
                 }
               }
             } else {
-              const pressure = ds.some((p) => dist(p, qb) < 2.8);
+              const pressure = ds.some(
+                (p) => !engaged.has(p.id) && dist(p, qb) < 2.8,
+              );
               move(
                 qb,
                 {
-                  x: pressure && play.scramble ? qb.x + (qb.x > 0 ? 3 : -3) : 0,
-                  y: -Math.max(1, play.drop || 5),
+                  x:
+                    pressure && play.scramble && play.kind === "pass"
+                      ? qb.x + (qb.x > 0 ? 3 : -3)
+                      : 0,
+                  y: -Math.max(
+                    ["run", "option", "triple", "rpo", "qb"].includes(play.kind)
+                      ? play.kind === "triple"
+                        ? 1
+                        : 2.5
+                      : 1,
+                    play.drop || 5,
+                  ),
                 },
                 0.7,
               );
-              if (t >= nextRead && !thrown && t > 0.5) {
-                let reads = play.reads || ["X", "Y", "Z", "H", "RB"];
+              if (play.kind === "pass" && t >= nextRead && !thrown && t > 0.5) {
+                let reads = [...(play.reads || ["X", "Y", "Z", "H", "RB"])];
+                for (const rule of evaluateLogic(play, {
+                  os,
+                  ds,
+                  qb,
+                  t,
+                  handed,
+                }).reverse()) {
+                  if (!logicSeen.has(rule.id)) {
+                    event(
+                      "logic",
+                      rule.when +
+                        " → " +
+                        rule.action +
+                        " " +
+                        (rule.target || ""),
+                    );
+                    logicSeen.add(rule.id);
+                  }
+                  if (["prioritize", "hot"].includes(rule.action))
+                    reads = [
+                      rule.target,
+                      ...reads.filter((id) => id !== rule.target),
+                    ];
+                  if (rule.action === "scramble" && play.scramble) {
+                    escaping = true;
+                    handed = true;
+                    qb.path = [
+                      [qb.x > 0 ? 8 : -8, 0],
+                      [qb.x > 0 ? 12 : -12, 20],
+                    ];
+                    qb.node = 0;
+                  }
+                  if (rule.action === "route") {
+                    const q = byId(rule.target);
+                    if (q && !q.routeDecision)
+                      q.option = rule.option || "break-away";
+                  }
+                }
                 if (
                   play.condition === "hot-blitz" &&
-                  ds.filter((p) => p.assignment === "rush").length > 4 &&
+                  ds.filter((p) => p.vy < -0.5 && p.y < 2).length > 4 &&
                   qb.ratings.awareness > 60
                 )
                   reads = [play.hot, ...reads];
@@ -523,6 +831,7 @@ export function simulate({
                     throwPass(target);
                 }
                 if (!thrown && t > 5.7 && play.scramble) {
+                  escaping = true;
                   handed = true;
                   qb.path = [
                     [qb.x > 0 ? 8 : -8, 0],
@@ -532,7 +841,24 @@ export function simulate({
                   event("scramble", "Protection exhausted; QB escapes");
                 } else if (!thrown && t > 7) {
                   if (Math.abs(qb.x) > 3) {
-                    finish("incomplete");
+                    const end = {
+                      x: Math.sign(qb.x) * 29,
+                      y: Math.max(1, qb.y + 10),
+                    };
+                    flight = {
+                      from: { x: qb.x, y: qb.y },
+                      to: end,
+                      start: t,
+                      duration: Math.max(0.5, dist(qb, end) / 26),
+                      type: "pass",
+                      target: null,
+                    };
+                    carrier = null;
+                    thrown = true;
+                    passer = qb.athleteId;
+                    qb.pose = "throw";
+                    qb.poseUntil = t + 0.35;
+                    qb.state = "throw";
                     event("throwaway", "Outside tackle box; throw beyond line");
                   } else {
                     finish("penalty");
@@ -549,10 +875,25 @@ export function simulate({
               }
             }
           }
-        } else if (qb.state !== "throw") move(qb, { x: qb.x, y: qb.y }, 0.2);
+        } else if (qb.poseUntil <= t || qb.state !== "throw")
+          move(qb, { x: qb.x, y: qb.y }, 0.2);
         continue;
       }
-      if (["route", "run"].includes(p.assignment)) route(p);
+      if (
+        !handed &&
+        ["run", "option", "triple", "rpo"].includes(play.kind) &&
+        p.id === (play.runner || "RB") &&
+        play.exchange !== "toss"
+      )
+        move(p, { x: qb.x + 1, y: qb.y + 0.1 }, 0.95);
+      else if (
+        play.kind === "triple" &&
+        handed &&
+        carrier === qb &&
+        p.id === "RB"
+      )
+        move(p, { x: qb.x + 4.5, y: qb.y - 2 }, 0.94);
+      else if (["route", "run"].includes(p.assignment)) route(p);
     }
     for (const p of ds) {
       if (engaged.has(p.id)) continue;
@@ -561,6 +902,10 @@ export function simulate({
         (carrier === qb && handed) ||
         complete ||
         intercepted;
+      if (flight?.type === "pitch" || loose) {
+        move(p, loose || football, 1);
+        continue;
+      }
       if (intercepted && p === carrier) {
         run(p);
         continue;
@@ -572,6 +917,22 @@ export function simulate({
           threat.vx *= 0.65;
           threat.vy *= 0.65;
         } else move(p, threat, 0.85);
+        continue;
+      }
+      if (
+        play.fake &&
+        !thrown &&
+        t > 0.35 &&
+        t < 1.2 &&
+        p.pos === "LB" &&
+        p.ratings.awareness < 76
+      ) {
+        move(p, { x: byId("RB").x, y: 1 }, 0.85);
+        continue;
+      }
+      if (p.keyedRunner?.until > t) {
+        const meshRunner = byId(p.keyedRunner.id);
+        move(p, meshRunner || qb, 0.95);
         continue;
       }
       if (runKnown && carrier) {
@@ -602,19 +963,7 @@ export function simulate({
           );
           continue;
         }
-        const lead = clamp(
-          dist(p, carrier) / (4 + p.ratings.pursuit * 0.05),
-          0,
-          0.8,
-        );
-        move(
-          p,
-          {
-            x: clamp(carrier.x + carrier.vx * lead, -27, 27),
-            y: carrier.y + carrier.vy * lead,
-          },
-          1,
-        );
+        move(p, pursuitPoint(p, carrier), 1);
         continue;
       }
       if (
@@ -663,30 +1012,27 @@ export function simulate({
       }
       if (p.assignment === "man") {
         const receiver = byId(p.target) || os[5];
-        const lag = (100 - p.ratings.coverage) * 0.022;
+        const reaction = Math.round(
+          clamp(
+            (200 - p.ratings.coverage - p.ratings.awareness) * 0.002,
+            0.07,
+            0.4,
+          ) / DT,
+        );
+        const seen =
+          observation[Math.max(0, observation.length - 1 - reaction)].find(
+            (v) => v.id === receiver.id,
+          ) || receiver;
         move(
           p,
-          {
-            x: receiver.x + receiver.vx * lag,
-            y: receiver.y + 1 + receiver.vy * lag,
-          },
-          0.96,
+          { x: seen.x + seen.vx * 0.12, y: seen.y + 1.3 + seen.vy * 0.12 },
+          0.98,
         );
       } else {
-        const zone = pt(p.zone || [p.x, p.assignment === "deep" ? 22 : 8]);
-        const nearby = os
-          .filter((o) => ["route", "run"].includes(o.assignment))
-          .sort((a, b) => dist(a, zone) - dist(b, zone))[0];
-        let target = zone;
-        if (nearby && dist(nearby, zone) < (p.assignment === "deep" ? 15 : 10))
-          target = {
-            x: zone.x * 0.25 + nearby.x * 0.75,
-            y:
-              p.assignment === "deep"
-                ? Math.max(zone.y, nearby.y + 2)
-                : nearby.y + 1,
-          };
-        move(p, target, 0.9);
+        const landmark = coverageTarget(p, os, ds, qb);
+        if (p.assignment === "deep")
+          landmark.y = Math.min(goal + 2, landmark.y);
+        move(p, landmark, 0.96);
       }
     }
     // Offensive pursuit after interception; legal contact and body separation otherwise.
@@ -717,7 +1063,72 @@ export function simulate({
           Math.sin(Math.PI * u) *
             Math.min(9, dist(flight.from, flight.to) * 0.21),
       };
-      if (u >= 1) {
+      if (flight.type === "pitch" && u >= 1) {
+        const back = byId(flight.target);
+        if (
+          back &&
+          dist(back, football) < 1.8 &&
+          random() < clamp(0.72 + back.ratings.catching * 0.003, 0, 0.99)
+        ) {
+          carrier = back;
+          back.node = 0;
+          event("handoff", "Pitch secured by #" + back.number);
+        } else {
+          loose = { x: football.x, y: football.y };
+          carrier = qb;
+          event("fumble", "Pitch hits the ground");
+        }
+        flight = null;
+      }
+      if (flight) flight.attempted ||= new Set();
+      for (const defender of ds) {
+        if (Math.abs(defender.x) >= 26.67 || defender.y > goal + 10) continue;
+        if (
+          !flight ||
+          flight.type === "pitch" ||
+          u <= 0.1 ||
+          u >= 1 ||
+          flight.attempted.has(defender.id)
+        )
+          continue;
+        const reach = (defender.height || 72) / 36 + 0.55;
+        if (football.z > reach || dist(defender, football) > 0.9) continue;
+        flight.attempted.add(defender.id);
+        if (
+          random() <
+          clamp(
+            (defender.ratings.coverage + defender.ratings.awareness) / 500,
+            0.1,
+            0.4,
+          )
+        ) {
+          if (u > 0.65 && random() < defender.ratings.catching / 160) {
+            carrier = defender;
+            receiver = defender.athleteId;
+            intercepted = true;
+            inReturnEndzone = defender.y >= goal;
+            defender.pose = "catch";
+            defender.poseUntil = t + 0.3;
+            credit(defender, "defInts");
+            event(
+              "interception",
+              "#" + defender.number + " undercuts the ball in flight",
+            );
+            flight = null;
+            break;
+          } else {
+            credit(defender, "deflections");
+            event(
+              "deflection",
+              "#" + defender.number + " gets a hand on the pass",
+            );
+            flight = null;
+            finish("incomplete");
+            break;
+          }
+        }
+      }
+      if (flight && u >= 1 && flight.type !== "pitch") {
         const eligible = os.filter((p) =>
             ["route", "chip"].includes(p.assignment),
           ),
@@ -746,14 +1157,27 @@ export function simulate({
             break;
           }
         }
-        if (caught) {
+        if (
+          caught &&
+          (Math.abs(caught.x) >= 26.67 ||
+            caught.y > goal + 10 ||
+            caught.y < -ball - 10)
+        ) {
+          flight = null;
+          finish("incomplete");
+        } else if (caught) {
           carrier = caught;
+          caught.pose = "catch";
+          caught.poseUntil = t + 0.28;
           receiver = caught.athleteId;
           if (caught.side) {
             intercepted = true;
+            inReturnEndzone = caught.y >= goal;
             event("interception", `#${caught.number} intercepts`);
+            credit(caught, "defInts");
           } else {
             complete = true;
+            catchY = caught.y;
             event("catch", `#${caught.number} secures the catch`);
           }
           caught.node = 99;
@@ -778,6 +1202,7 @@ export function simulate({
           carrier = recover;
           intercepted = recover.side === 1;
           event("recovery", `#${recover.number} recovers`);
+          credit(recover, "recoveries");
           loose = null;
           finish("fumble");
           result.turnover = intercepted;
@@ -787,8 +1212,7 @@ export function simulate({
         const opponents = carrier.side ? os : ds;
         for (const defender of opponents) {
           if (
-            engaged.has(defender.id) ||
-            dist(carrier, defender) > 1 ||
+            dist(carrier, defender) > (engaged.has(defender.id) ? 0.6 : 1.1) ||
             t < 0.6
           )
             continue;
@@ -809,6 +1233,8 @@ export function simulate({
           ) {
             event("tackle", `#${defender.number} wraps #${carrier.number}`);
             defender.state = "tackle";
+            credit(defender, "tackles");
+            if (carrier === qb && !handed) credit(defender, "sacks");
             if (
               random() <
               clamp((100 - carrier.ratings.security) * 0.0008, 0, 0.06)
@@ -818,15 +1244,21 @@ export function simulate({
                 y: carrier.y + (random() - 0.5) * 2,
               };
               event("fumble", "Ball knocked loose");
+              credit(defender, "forcedFumbles");
             } else finish(carrier === qb && !handed ? "sack" : "tackle");
             break;
           } else {
             event("break", "Tackle broken");
             defender.state = "stumble";
+            defender.pose = "stumble";
+            defender.poseUntil = t + 0.4;
+            credit(carrier, "brokenTackles");
             defender.vx *= 0.2;
             defender.vy *= 0.2;
           }
         }
+        if (inReturnEndzone && carrier.side === 1 && carrier.y < goal)
+          inReturnEndzone = false;
         if (!dead && !loose) {
           if (Math.abs(carrier.x) > 26.67) finish("out");
           else if (
@@ -835,8 +1267,8 @@ export function simulate({
           )
             finish("touchdown");
           else if (
-            (carrier.side === 0 && carrier.y <= -ball) ||
-            (carrier.side === 1 && carrier.y >= goal)
+            (carrier.side === 0 && carrier.y <= -ball - 10) ||
+            (carrier.side === 1 && carrier.y >= goal + 10 && !inReturnEndzone)
           )
             finish("safety");
         }
@@ -856,6 +1288,28 @@ export function simulate({
   }
   return packageResult();
   function packageResult() {
+    if (result) {
+      result.production = production;
+      result.liveEnd = result.duration;
+    }
+    if (frames.length && result?.duration > 0) {
+      const last = frames.at(-1);
+      for (let n = 1; n <= 14; n++) {
+        const tail = clone(last),
+          dt = n * 0.1;
+        tail.t = round(last.t + dt);
+        if (result.reason === "incomplete")
+          tail.ball[2] = Math.max(0, last.ball[2] - dt * 3);
+        tail.players.forEach((v, i) => {
+          v[2] = v[3] = 0;
+          if (v[4] === "down" || v[4] === "tackle") {
+            v[4] = dt < 0.4 ? "fall" : dt < 0.8 ? "ground" : "rise";
+            v[5] = dt < 0.4 ? dt / 0.4 : dt < 0.8 ? 1 : (dt - 0.8) / 0.6;
+          } else if (v[4] !== "celebrate") v[4] = "idle";
+        });
+        frames.push(tail);
+      }
+    }
     return {
       result,
       events,

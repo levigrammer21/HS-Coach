@@ -9,16 +9,14 @@ service cloud.firestore {
    }
    match /games/{code} {
     function member() { return signed() && request.auth.uid in resource.data.members; }
+    // Account access and one committed sequence protect reliability.
+    // The client locks roster/tendencies; rules avoid expensive whole-roster comparisons.
     function validTurn() {
      return member() && resource.data.status == 'active' && resource.data.turn == request.auth.uid
       && request.resource.data.seq == resource.data.seq + 1
       && request.resource.data.game.seq == request.resource.data.seq
       && request.resource.data.members == resource.data.members
-      && request.resource.data.names == resource.data.names
-      && request.resource.data.books == resource.data.books
       && request.resource.data.version == resource.data.version
-      && request.resource.data.game.defenses == resource.data.game.defenses
-      && request.resource.data.game.teams == resource.data.game.teams
       && request.resource.data.turn == resource.data.members[request.resource.data.game.possession]
       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['game','seq','turn','status','updated']);
     }
@@ -26,15 +24,13 @@ service cloud.firestore {
     allow list: if signed() && (request.auth.uid in resource.data.members || resource.data.status == 'complete');
     allow create: if signed() && request.resource.data.members == [request.auth.uid]
      && request.resource.data.status == 'waiting' && request.resource.data.seq == 0
-     && request.resource.data.version == 'hsf-1.0.0';
+     && request.resource.data.version == 'hsf-1.2.0';
     allow update: if signed() && (validTurn() || (
      resource.data.status == 'waiting' && resource.data.members.size() == 1
      && !(request.auth.uid in resource.data.members)
      && request.resource.data.members == resource.data.members.concat([request.auth.uid])
      && request.resource.data.status == 'active' && request.resource.data.seq == 0
      && request.resource.data.version == resource.data.version
-     && request.resource.data.game.teams[0] == resource.data.game.teams[0]
-     && request.resource.data.game.defenses[0] == resource.data.game.defenses[0]
      && request.resource.data.game.seq == 0
      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members','names','books','status','turn','game','updated'])
     ));

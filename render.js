@@ -1,3 +1,4 @@
+import { drawPlayArt } from "./play-art.js";
 import { clamp } from "./data.js";
 const mix = (a, b, u) => a + (b - a) * u;
 export class Stadium {
@@ -10,6 +11,10 @@ export class Stadium {
     this.time = 0;
     this.playing = false;
     this.overlay = false;
+    this.defenseArt = false;
+    this.artSelected = null;
+    this.loopPreview = false;
+    this.zoom = 1;
     this.labels = true;
     this.focus = 4;
     this.last = performance.now();
@@ -35,6 +40,7 @@ export class Stadium {
         }
       });
       this.selected = best >= 0 ? this.film.players[best] : null;
+      this.artSelected = this.selected?.side === 0 ? this.selected.id : null;
     };
     this.canvas.addEventListener?.("click", this.tap);
     this.raf = requestAnimationFrame((t) => this.tick(t));
@@ -51,28 +57,36 @@ export class Stadium {
   setFilm(f, autoplay = false) {
     this.selected = null;
     this.film = f;
-    this.time = 0;
+    this.time = f?.frames?.[0]?.t || 0;
     this.focus = 4;
     this.playing = autoplay;
     this.ended = false;
   }
   seek(t) {
-    this.time = clamp(t, 0, this.film?.frames.at(-1)?.t || 0);
+    this.time = clamp(
+      t,
+      this.film?.frames?.[0]?.t || 0,
+      this.film?.frames.at(-1)?.t || 0,
+    );
     this.ended = false;
     this.draw();
   }
   destroy() {
+    this.destroyed = true;
     this.canvas.removeEventListener?.("click", this.tap);
     cancelAnimationFrame(this.raf);
     this.observer.disconnect();
   }
   tick(now) {
+    if (this.destroyed) return;
     const dt = Math.min((now - this.last) / 1000, 0.06);
     this.last = now;
     if (this.playing && this.film) {
       this.time += dt * this.speed;
       const end = this.film.frames.at(-1)?.t || 0;
-      if (this.time >= end + 0.9) {
+      if (this.film.preview && this.loopPreview && this.time >= end + 0.8) {
+        this.time = this.film.frames[0].t;
+      } else if (this.time >= end + 0.3) {
         this.time = end;
         this.playing = false;
         if (!this.ended) {
@@ -81,12 +95,13 @@ export class Stadium {
         }
       }
     }
+    if (this.destroyed) return;
     this.draw();
     this.onTime?.(this.time);
     this.raf = requestAnimationFrame((t) => this.tick(t));
   }
   project(x, y, z = 0) {
-    const s = this.w / 68;
+    const s = (this.w / 68) * this.zoom;
     return [
       this.w / 2 + x * s + (y - this.focus) * s * 0.17,
       this.h * 0.64 - (y - this.focus) * s * 0.57 - z * s * 0.7,
@@ -226,25 +241,13 @@ export class Stadium {
       c.fillText("FRIDAY NIGHT STARTS HERE", w / 2, h * 0.54);
       return;
     }
-    if (this.overlay) {
-      for (const s of f.play.slots || []) {
-        let prev = [s.x, s.y];
-        for (const p of s.path || []) {
-          this.line(prev, p, "#f1d47e99", 2, [4, 4]);
-          prev = p;
-        }
-      }
-      for (const s of f.call.slots || [])
-        if (s.zone) {
-          const p = this.project(...s.zone);
-          c.beginPath();
-          c.ellipse(p[0], p[1], w * 0.065, w * 0.035, 0, 0, Math.PI * 2);
-          c.fillStyle = "#7cd9ff22";
-          c.fill();
-          c.strokeStyle = "#7cd9ff66";
-          c.stroke();
-        }
-    }
+    if (this.overlay || f.preview || this.time < 0)
+      drawPlayArt(c, (...p) => this.project(...p), f.play, f.call, {
+        width: w,
+        defense: this.defenseArt,
+        selected: this.artSelected,
+        reads: true,
+      });
     const order = f.players
       .map((p, i) => ({
         p,
@@ -290,7 +293,15 @@ export class Stadium {
         h - 20,
       );
     }
-    if (!this.playing && this.time > 0) {
+    if (f.preview) {
+      c.fillStyle = "#07141ac9";
+      c.fillRect(10, 10, Math.min(w - 20, 310), 33);
+      c.fillStyle = "#f4cf75";
+      c.font = "700 11px system-ui";
+      c.textAlign = "left";
+      c.fillText("PLAY ART  ·  " + f.play.name, 20, 31);
+    }
+    if (!f.preview && !this.playing && this.time > 0) {
       c.fillStyle = "#07141ac9";
       c.fillRect(w / 2 - 70, 12, 140, 26);
       c.fillStyle = "#c8d8d7";
@@ -306,14 +317,19 @@ export class Stadium {
       state = v[4],
       speed = Math.hypot(v[2], v[3]),
       phase = this.time * (9 + speed),
-      stride =
-        state === "run" || state === "backpedal" ? Math.sin(phase) * 3 : 0,
+      stride = ["run", "backpedal", "shuffle"].includes(state)
+        ? Math.sin(phase) *
+          (state === "shuffle" ? 1.5 : state === "backpedal" ? -2 : 3)
+        : 0,
       team = p.side ? f.defense : f.offense,
       jersey = p.side ? "#e9ede7" : team.primary,
       helmet = team.secondary;
     c.save();
     c.translate(px, py);
     c.scale(s, s);
+    // Shoulder lean follows momentum; the backpedal opens gradually into a chase.
+    const lean = clamp(v[2] * 0.018, -0.16, 0.16);
+    c.rotate(lean);
     c.fillStyle = "#07161166";
     c.beginPath();
     c.ellipse(0, 1, 8, 3, 0, 0, Math.PI * 2);
@@ -324,6 +340,12 @@ export class Stadium {
       c.beginPath();
       c.ellipse(0, 1, 10, 4, 0, 0, Math.PI * 2);
       c.stroke();
+    }
+    if (["fall", "ground", "rise"].includes(state)) {
+      const angle =
+        state === "fall" ? v[5] || 0 : state === "ground" ? 1 : 1 - (v[5] || 0);
+      c.rotate(-1.2 * angle);
+      c.translate(0, angle * 3);
     }
     if (state === "down" || state === "tackle") {
       c.rotate(state === "down" ? -0.9 : 0.7);
@@ -358,11 +380,20 @@ export class Stadium {
     c.lineWidth = 3;
     c.beginPath();
     c.moveTo(-5, -12);
-    c.lineTo(-8, state === "block" ? -15 : -7 - stride);
+    c.lineTo(
+      -8,
+      state === "catch" ? -24 : state === "block" ? -15 : -7 - stride,
+    );
     c.moveTo(5, -12);
     c.lineTo(
       state === "throw" ? 11 : 8,
-      state === "throw" ? -21 : state === "block" ? -15 : -7 + stride,
+      state === "catch"
+        ? -24
+        : state === "throw"
+          ? -21
+          : state === "block"
+            ? -15
+            : -7 + stride,
     );
     c.stroke();
     c.fillStyle = p.side ? team.primary : "#fff";
@@ -377,7 +408,12 @@ export class Stadium {
     c.fillRect(-3, -18, 6, 2);
     c.fillStyle = team.primary;
     c.fillRect(-0.8, -23, 1.6, 8);
-    if (this.labels && (carrier || this.overlay)) {
+    if (
+      this.labels &&
+      (carrier ||
+        this.selected?.id === p.id ||
+        (this.overlay && !["C", "G", "T", "DT", "DE"].includes(p.pos)))
+    ) {
       c.fillStyle = "#061116c9";
       c.fillRect(-15, -36, 30, 10);
       c.fillStyle = "#fff";

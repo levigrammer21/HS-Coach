@@ -1,3 +1,8 @@
+import { analyzeFilm } from "./film-analysis.js";
+import { migrateProfile } from "./migration.js";
+import { scout, leaders } from "./statistics.js";
+import { FORMATIONS, applyFormation, defensiveTemplate } from "./formations.js";
+import { previewFilm, CONDITIONS, LOGIC_ACTIONS } from "./football.js";
 import {
   TEAMS,
   VERSION,
@@ -16,7 +21,7 @@ import {
   validateFormation,
   teamFit,
 } from "./data.js";
-import { newGame, advance, aiPlay, timeout } from "./rules.js";
+import { newGame, advance, aiPlay, timeout, simulateKick } from "./rules.js";
 import {
   createFranchise,
   standings,
@@ -25,7 +30,7 @@ import {
   nextYear,
   reschedule,
 } from "./franchise.js";
-import { load, save, download } from "./storage.js";
+import { load, save, download, remove } from "./storage.js";
 import { Stadium } from "./render.js";
 import * as cloud from "./cloud.js";
 const $ = (s) => document.querySelector(s),
@@ -59,6 +64,9 @@ const crest = (t) =>
 const head = (k, h, p = "", actions = "") =>
   `<div class="page-head"><div><div class="kicker">${k}</div><h2>${h}</h2>${p ? `<p>${p}</p>` : ""}</div><div class="actions">${actions}</div></div>`;
 const uid = () => crypto.randomUUID();
+const localProfileExists = !!(await load("profile"));
+let designerDraft = await load("designerDraft"),
+  draftTimer;
 let data = await load("profile", {
   version: VERSION,
   team: 1,
@@ -68,8 +76,15 @@ let data = await load("profile", {
   filmIds: [],
   franchise: null,
   game: null,
-  settings: { overlays: false, skipDefense: false, speed: 1 },
+  settings: {
+    overlays: true,
+    skipDefense: false,
+    speed: 1,
+    defenseArt: false,
+    autoCloud: true,
+  },
 });
+data = migrateProfile(data);
 if (!data.settings)
   data.settings = { overlays: false, skipDefense: false, speed: 1 };
 let page = "home",
@@ -96,6 +111,22 @@ let page = "home",
   matchesError = "",
   filmIndex = data.filmIds || [],
   filmPick = 0;
+let lastFilm = null,
+  showCall = true,
+  watchState = null;
+data.books ||= [
+  { id: "varsity", name: "Varsity playbook", plays: clone(data.book) },
+];
+data.activeBook ||= "varsity";
+data.depthCharts ||= {};
+data.settings.autoCloud ??= true;
+data.version = VERSION;
+if (data.game) data.game.version = VERSION;
+let cloudRevision = null,
+  cloudReady = false,
+  cloudSaveTimer = null,
+  cloudSaving = false,
+  cloudSaveState = "Local save ready";
 const nav = [
   ["home", "⌂", "Home"],
   ["game", "◈", "Gameday"],
@@ -107,6 +138,7 @@ const nav = [
   ["roster", "▥", "Roster"],
   ["settings", "⚙", "Settings"],
 ];
+let fieldExpanded = false;
 const actions = {};
 function act(name, fn) {
   actions[name] = fn;
@@ -126,18 +158,25 @@ async function persist() {
       data.human = human;
     }
     data.filmIds = filmIndex;
+    const active = data.books?.find((b) => b.id === data.activeBook);
+    if (active) active.plays = clone(data.book);
+    data.updatedAt = Date.now();
     await save("profile", data);
     dirty = false;
+    queueCloudSave();
     document
       .querySelectorAll(".save-state")
       .forEach((e) => (e.textContent = "Saved on this device"));
   } catch (e) {
-    toast("Save failed: " + e.message);
+    document
+      .querySelectorAll(".save-state")
+      .forEach((e) => (e.textContent = "Unsaved changes — export a backup"));
+    throw Error("Save failed: " + e.message);
   }
 }
 function autoSave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(persist, 200);
+  saveTimer = setTimeout(() => persist().catch(error), 200);
 }
 function error(e) {
   console.error(e);
@@ -154,7 +193,7 @@ function shell(content) {
   stadium?.destroy();
   stadium = null;
   $("#app").innerHTML =
-    `<div class="shell"><aside class="sidebar"><div class="brand">HS<span>FOOTBALL</span><small>THE COACH'S BOX</small></div><nav class="side-nav" aria-label="Main navigation">${nav.map(([id, icon, text]) => btn(`<span class="symbol">${icon}</span>${text}`, `nav:${id}`, page === id ? "active" : "")).join("")}</nav><div class="sidebar-footer"><div class="dot" style="display:inline-block"></div> FRIDAY NIGHT, EVERY NIGHT<br><span class="save-state">${dirty ? "Saving…" : "Saved on this device"}</span><br>Engine ${VERSION}</div></aside><main class="main"><header class="topbar"><div class="mobile-brand brand">HS<span>FOOTBALL</span></div><div class="breadcrumb">The Coach's Box / ${nav.find((n) => n[0] === page)?.[2]}</div><div class="status"><i class="dot"></i>${esc(user ? "Signed in • " + (user.displayName || user.email?.split("@")[0]) : cloudStatus)}</div></header>${content}</main></div>`;
+    `<div class="shell"><aside class="sidebar"><div class="brand">HS<span>FOOTBALL</span><small>THE COACH'S BOX</small></div><nav class="side-nav" aria-label="Main navigation">${nav.map(([id, icon, text]) => btn(`<span class="symbol">${icon}</span>${text}${id === "friends" && user && matches.some((m) => m.status === "active" && m.turn === user.uid) ? `<span class="nav-dot">${matches.filter((m) => m.status === "active" && m.turn === user.uid).length}</span>` : ""}`, `nav:${id}`, page === id ? "active" : "")).join("")}</nav><div class="sidebar-footer"><div class="dot" style="display:inline-block"></div> FRIDAY NIGHT, EVERY NIGHT<br><span class="save-state">${dirty ? "Saving…" : "Saved on this device"}</span><br>Engine ${VERSION}</div></aside><main class="main"><header class="topbar"><div class="mobile-brand brand">HS<span>FOOTBALL</span></div><div class="breadcrumb">The Coach's Box / ${nav.find((n) => n[0] === page)?.[2]}</div><div class="status"><i class="dot"></i>${esc(user ? "Signed in • " + (user.displayName || user.email?.split("@")[0]) : cloudStatus)}</div></header>${content}</main></div>`;
 }
 function render() {
   if (page === "home") home();
@@ -163,6 +202,7 @@ function render() {
   else if (page === "defense") edit && editDef ? designer() : defensePage();
   else if (page === "franchise") franchisePage();
   else if (page === "friends") friendsPage();
+  else if (page === "home") home();
   else if (page === "film") filmPage();
   else if (page === "roster") rosterPage();
   else settingsPage();
@@ -201,9 +241,10 @@ function mini(p) {
     .join("");
   return `<svg viewBox="0 0 64 50" aria-hidden="true">${path}${p.slots.map((s) => `<circle cx="${32 + s.x}" cy="${40 - s.y}" r="1.6" fill="#b5d4c6"/>`).join("")}</svg>`;
 }
+let bookSearch = "";
 function playbook() {
   shell(
-    `${head("The install", "Offensive playbook", `${data.book.length} plays • Tap a play to edit every assignment.`, btn("Team fit", "fit", "ghost") + btn("+ New play", "new-play", "primary"))}<div class="tabs">${["all", "pass", "run", "option", "rpo", "qb"].map((k) => btn(k === "all" ? "All concepts" : k.toUpperCase(), `filter:${k}`, filter === k ? "active small" : "small")).join("")}${btn("Import / export", "book-transfer", "small ghost")}</div><div class="grid cols3">${data.book
+    `${head("The install", "Offensive playbook", `${data.book.length} plays • Tap a play to edit every assignment.`, btn("Team fit", "fit", "ghost") + btn("+ New play", "new-play", "primary") + (designerDraft ? btn("Resume board draft", "resume-draft", "ghost") : ""))}<div class="tabs">${["all", "pass", "run", "option", "rpo", "qb"].map((k) => btn(k === "all" ? "All concepts" : k.toUpperCase(), `filter:${k}`, filter === k ? "active small" : "small")).join("")}${btn("Import / export", "book-transfer", "small ghost")}</div><div class="grid cols3">${data.book
       .filter(
         (p) =>
           filter === "all" ||
@@ -213,10 +254,41 @@ function playbook() {
       )
       .map(
         (p) =>
-          `<section class="panel"><div class="row">${mini(p)}<div><div class="kicker">${esc(p.formation)} / ${p.kind}</div><h3>${esc(p.name)}</h3></div></div><p class="muted" style="font-size:11px">${esc(p.concept)}${p.tags?.length ? " • " + esc(p.tags.join(", ")) : ""}</p><div class="row">${btn("Edit board", `edit:${p.id}`, "small")}${btn("Duplicate", `duplicate:${p.id}`, "small ghost")}${btn("✕", `delete:${p.id}`, "small danger", 'aria-label="Delete play"')}</div></section>`,
+          `<section class="panel" data-play-search="${esc([p.name, p.formation, p.concept, ...(p.tags || [])].join(" ").toLowerCase())}"><div class="row">${mini(p)}<div><div class="kicker">${esc(p.formation)} / ${p.kind}</div><h3>${esc(p.name)}</h3></div></div><p class="muted" style="font-size:11px">${esc(p.concept)}${p.tags?.length ? " • " + esc(p.tags.join(", ")) : ""}</p><div class="row">${btn("Edit board", `edit:${p.id}`, "small")}${btn("Duplicate", `duplicate:${p.id}`, "small ghost")}${btn("✕", `delete:${p.id}`, "small danger", 'aria-label="Delete play"')}</div></section>`,
       )
       .join("")}</div>`,
   );
+  $(".page-head").insertAdjacentHTML(
+    "afterend",
+    `<div class="book-bar row between"><div class="row">${label(
+      "Active playbook",
+      select(
+        "active-book",
+        data.books.map((b) => [b.id, b.name]),
+        data.activeBook,
+      ),
+    )}${btn("+ Book", "new-book", "small")}${btn("Rename", "rename-book", "small ghost")}</div>${label("Search formation, concept or tag", input("play-search", bookSearch))}</div>`,
+  );
+  $("#active-book").onchange = async (e) => {
+    const old = data.books.find((b) => b.id === data.activeBook);
+    old.plays = clone(data.book);
+    data.activeBook = e.target.value;
+    data.book = clone(data.books.find((b) => b.id === data.activeBook).plays);
+    selected = data.book[0]?.id;
+    await persist();
+    playbook();
+  };
+  $("#play-search").oninput = (e) => {
+    bookSearch = e.target.value;
+    document
+      .querySelectorAll("[data-play-search]")
+      .forEach((el) =>
+        el.classList.toggle(
+          "hidden",
+          !el.dataset.playSearch.includes(bookSearch.toLowerCase()),
+        ),
+      );
+  };
 }
 act("new-play", () => {
   edit = clone(defaults()[0]);
@@ -313,7 +385,7 @@ function designer() {
   slotId = s.id;
   const issues = editDef ? [] : validateFormation(edit);
   shell(
-    `${head(editDef ? "Defensive install" : "Offensive install", esc(edit.name), "Drag alignments. Draw assignments. Tap an athlete to inspect.", btn("Back", "editor-back", "ghost") + btn("Save install", "save-play", "primary"))}<div class="designer-layout"><div><div class="designer-field"><div class="designer-tools">${(editDef ? ["align", "zone"] : ["align", "route", "motion", "shift"]).map((t) => btn(t[0].toUpperCase() + t.slice(1), `tool:${t}`, tool === t ? "active" : "")).join("")}${btn("Undo", "editor-undo", "ghost")}${btn("Clear path", "clear-path", "ghost")}</div><canvas id="board" aria-label="Touch football play designer"></canvas></div><div class="slot-pills">${edit.slots.map((s) => btn(s.id, `slot:${s.id}`, s.id === slotId ? "active" : "")).join("")}</div><div class="note" id="legality">${editDef ? "Defenders: align the front, assign coverage and pass rush, then set zone landmarks." : issues.length ? `<span class="warning">${issues.map(esc).join("<br>")}</span>` : '<span class="good">✓ Legal base alignment and receiver eligibility</span> • Every shift must be set for one second. Motion must remain lateral or backward.'}</div><div class="row section-gap">${!editDef ? btn("Save formation", "save-formation", "small") + btn("Load formation", "load-formation", "small") + btn("Test in practice", "test-play", "small primary") : ""}</div></div><aside class="panel inspector">${label("Play name", input("edit-name", edit.name), "wide")}${!editDef ? label("Concept / category", input("edit-concept", edit.concept), "wide") : label("Situational eligibility", select("edit-situation", ["any", "long", "short", "redzone"], edit.situation), "wide")}<div class="panel-heading wide"><h3>${s.id} · ${s.pos}</h3><span class="badge">Assignment</span></div>${label("Position", select("slot-pos", editDef ? ["DE", "DT", "LB", "CB", "S"] : ["T", "G", "C", "TE", "WR", "RB", "QB"], s.pos))}${label("Responsibility", select("slot-assignment", editDef ? ["rush", "stunt", "man", "zone", "deep", "contain"] : ["route", "run", "quarterback", ...BLOCKS], s.assignment))}${label("Personnel", select("slot-athlete", [["", "Auto • best fit"], ...TEAMS[data.team].roster.map((p) => [p.id, `#${p.number} ${p.name} · ${p.pos}`])], s.athlete || ""), "wide")}${label("Lateral (yards)", input("slot-x", s.x, "number", 'step="0.5" min="-26" max="26"'))}${label("Depth (yards)", input("slot-y", s.y, "number", 'step="0.5" min="-13" max="30"'))}${label(editDef ? "Man target" : "Block target", select("slot-target", editDef ? SLOT.filter((x) => !["LT", "LG", "C", "RG", "RT", "QB"].includes(x)) : ["nearest", ...Array.from({ length: 11 }, (_, i) => `D${i}`)], s.target))}${!editDef ? label("Release delay (sec)", input("slot-delay", s.delay || 0, "number", 'min="0" max="6" step="0.1"')) : label("Stunt width", input("slot-stunt", s.stunt || 0, "number", 'min="-8" max="8"'))}${
+    `${head(editDef ? "Defensive install" : "Offensive install", esc(edit.name), "Drag alignments. Draw assignments. Tap an athlete to inspect.", btn("Back", "editor-back", "ghost") + btn("Save install", "save-play", "primary"))}<div class="designer-layout"><div><div class="designer-field"><div class="designer-tools">${(editDef ? ["align", "zone"] : ["align", "route", "motion", "shift"]).map((t) => btn(t[0].toUpperCase() + t.slice(1), `tool:${t}`, tool === t ? "active" : "")).join("")}${btn("Undo", "editor-undo", "ghost")}${btn("Redo", "editor-redo", "ghost")}${!editDef ? btn("Path points", "path-points", "ghost") : ""}${btn("Clear path", "clear-path", "ghost")}</div><canvas id="board" aria-label="Touch football play designer"></canvas></div><div class="slot-pills">${edit.slots.map((s) => btn(s.id, `slot:${s.id}`, s.id === slotId ? "active" : "")).join("")}</div><div class="note" id="legality">${editDef ? "Defenders: align the front, assign coverage and pass rush, then set zone landmarks." : issues.length ? `<span class="warning">${issues.map(esc).join("<br>")}</span>` : '<span class="good">✓ Legal base alignment and receiver eligibility</span> • Every shift must be set for one second. Motion must remain lateral or backward.'}</div><div class="row section-gap">${!editDef ? btn("Save formation", "save-formation", "small") + btn("Load formation", "load-formation", "small") + btn("Test in practice", "test-play", "small primary") : ""}</div></div><aside class="panel inspector">${label("Play name", input("edit-name", edit.name), "wide")}${!editDef ? btn("Conditional logic", "logic-editor", "small ghost wide") + btn("Formation library", "formation-library", "small ghost wide") : btn("Front / coverage templates", "defense-templates", "small ghost wide")}${!editDef ? label("Concept / category", input("edit-concept", edit.concept), "wide") : label("Situational eligibility", select("edit-situation", ["any", "long", "short", "redzone"], edit.situation), "wide")}<div class="panel-heading wide"><h3>${s.id} · ${s.pos}</h3><span class="badge">Assignment</span></div>${label("Position", select("slot-pos", editDef ? ["DE", "DT", "LB", "CB", "S"] : ["T", "G", "C", "TE", "WR", "RB", "QB"], s.pos))}${label("Responsibility", select("slot-assignment", editDef ? ["rush", "stunt", "man", "zone", "deep", "contain"] : ["route", "run", "quarterback", ...BLOCKS], s.assignment))}${label("Personnel", select("slot-athlete", [["", "Auto • best fit"], ...(mode === "franchise" && data.franchise ? data.franchise.teams[data.franchise.team] : TEAMS[data.team]).roster.map((p) => [p.id, `#${p.number} ${p.name} · ${p.pos}`])], s.athlete || ""), "wide")}${label("Lateral (yards)", input("slot-x", s.x, "number", 'step="0.5" min="-26" max="26"'))}${label("Depth (yards)", input("slot-y", s.y, "number", 'step="0.5" min="-13" max="30"'))}${label(editDef ? "Man target" : "Block target", select("slot-target", editDef ? SLOT.filter((x) => !["LT", "LG", "C", "RG", "RT", "QB"].includes(x)) : ["nearest", ...Array.from({ length: 11 }, (_, i) => `D${i}`)], s.target))}${!editDef ? label("Release delay (sec)", input("slot-delay", s.delay || 0, "number", 'min="0" max="6" step="0.1"')) : label("Stunt width", input("slot-stunt", s.stunt || 0, "number", 'min="-8" max="8"'))}${
       !editDef
         ? label(
             "Route starts after",
@@ -338,7 +410,21 @@ function designer() {
             ),
             "wide",
           )
-    }${!editDef ? label("Route adjustment", select("slot-option", ["none", "sit-zone", "break-away", "motion-read"], s.option), "wide") + label("Route library", select("route-template", ["Custom", ...Object.keys(ROUTES)], "Custom"), "wide") : ""}${!editDef ? `<div class="wide"><h3>Quarterback room</h3></div>${label("Play type", select("edit-kind", ["pass", "run", "qb", "option", "triple", "rpo", "kneel", "spike"], edit.kind))}${label("Ball carrier", select("edit-runner", ["RB", "QB", "H", "Y", "Z", "X"], edit.runner))}${label("Drop depth", input("edit-drop", edit.drop, "number", 'min="1" max="9" step="0.5"'))}${label("Read begins (sec)", input("edit-release", edit.release, "number", 'min="0.5" max="5" step="0.1"'))}${label("Read progression (comma separated)", input("edit-reads", edit.reads.join(",")), "wide")}${label("Conditional read", select("edit-condition", ["none", "hot-blitz", "overload", "leverage"], edit.condition), "wide")}${label("Hot receiver", select("edit-hot", ["X", "Y", "Z", "H", "RB"], edit.hot))}${label("Read defender position", select("edit-readDefender", ["DE", "DT", "LB", "CB", "S"], edit.readDefender))}${label("Allow quarterback escape", `<input id="edit-scramble" type="checkbox" ${edit.scramble ? "checked" : ""}>`, "inline wide")}${label("Situational tags (comma separated)", input("edit-tags", (edit.tags || []).join(",")), "wide")}` : ""}</aside></div>`,
+    }${!editDef ? label("Rounded route transitions", `<input id="slot-curved" type="checkbox" ${s.curved ? "checked" : ""}>`, "inline wide") : ""}${!editDef ? label("Route adjustment", select("slot-option", ["none", "sit-zone", "break-away", "motion-read"], s.option), "wide") + label("Route library", select("route-template", ["Custom", ...Object.keys(ROUTES)], "Custom"), "wide") : ""}${
+      !editDef
+        ? `<div class="wide"><h3>Quarterback room</h3></div>${label("Play-action mesh fake", `<input id="edit-fake" type="checkbox" ${edit.fake ? "checked" : ""}>`, "inline wide")}${label("Play type", select("edit-kind", ["pass", "run", "qb", "option", "triple", "rpo", "kneel", "spike"], edit.kind))}${label("Ball carrier", select("edit-runner", ["RB", "QB", "H", "Y", "Z", "X"], edit.runner))}${label(
+            "Exchange",
+            select(
+              "edit-exchange",
+              [
+                ["handoff", "Handoff / read mesh"],
+                ["toss", "Backward toss"],
+              ],
+              edit.exchange || "handoff",
+            ),
+          )}${label("Mesh timing (sec)", input("edit-mesh", edit.mesh ?? 0.75, "number", 'min="0.3" max="3" step="0.05"'))}<small class="wide">Draw the QB’s path to set his option keep lane. Triple option uses the selected runner as the dive back and RB as the trailing pitch back.</small>${label("Drop depth", input("edit-drop", edit.drop, "number", 'min="1" max="9" step="0.5"'))}${label("Read begins (sec)", input("edit-release", edit.release, "number", 'min="0.5" max="5" step="0.1"'))}${label("Read progression (comma separated)", input("edit-reads", edit.reads.join(",")), "wide")}${label("Conditional read", select("edit-condition", ["none", "hot-blitz", "overload", "leverage"], edit.condition), "wide")}${label("Hot receiver", select("edit-hot", ["X", "Y", "Z", "H", "RB"], edit.hot))}${label("Read defender position", select("edit-readDefender", ["DE", "DT", "LB", "CB", "S"], edit.readDefender))}${label("Option read side", select("edit-readSide", ["right", "left"], edit.readSide || "right"))}${label("Allow quarterback escape", `<input id="edit-scramble" type="checkbox" ${edit.scramble ? "checked" : ""}>`, "inline wide")}${label("Situational tags (comma separated)", input("edit-tags", (edit.tags || []).join(",")), "wide")}`
+        : ""
+    }</aside></div>`,
   );
   editorCanvas = $("#board");
   editorCtx = editorCanvas.getContext("2d");
@@ -351,12 +437,36 @@ function designer() {
   editorCtx.scale(d, d);
   drawBoard();
   bindEditor();
+  queueDraft();
 }
-let undo = [];
+let undo = [],
+  redo = [];
 function checkpoint() {
+  redo = [];
   undo.push(clone(edit));
   if (undo.length > 60) undo.shift();
+  queueDraft();
 }
+function queueDraft() {
+  if (!edit) return;
+  clearTimeout(draftTimer);
+  designerDraft = { play: clone(edit), defense: editDef, slot: slotId };
+  draftTimer = setTimeout(() => {
+    if (edit)
+      designerDraft = { play: clone(edit), defense: editDef, slot: slotId };
+    save("designerDraft", designerDraft).catch(error);
+  }, 300);
+}
+act("resume-draft", () => {
+  if (!designerDraft) return;
+  edit = clone(designerDraft.play);
+  editDef = designerDraft.defense;
+  slotId = designerDraft.slot || edit.slots[0].id;
+  undo = [];
+  redo = [];
+  tool = "align";
+  designer();
+});
 function drawBoard() {
   const c = editorCtx,
     w = editorW,
@@ -448,7 +558,11 @@ function bindEditor() {
     "condition",
     "hot",
     "readDefender",
+    "readSide",
     "scramble",
+    "fake",
+    "exchange",
+    "mesh",
     "situation",
     "tags",
     "reads",
@@ -457,9 +571,9 @@ function bindEditor() {
     if (e)
       e.onchange = () => {
         checkpoint();
-        edit[key] = ["drop", "release"].includes(key)
+        edit[key] = ["drop", "release", "mesh"].includes(key)
           ? +e.value
-          : key === "scramble"
+          : ["scramble", "fake"].includes(key)
             ? e.checked
             : key === "reads" || key === "tags"
               ? e.value
@@ -467,6 +581,7 @@ function bindEditor() {
                   .map((s) => s.trim())
                   .filter(Boolean)
               : e.value;
+        queueDraft();
       };
   }
   for (const key of [
@@ -491,8 +606,14 @@ function bindEditor() {
           ? +e.value
           : e.value;
         drawBoard();
+        queueDraft();
       };
   }
+  if ($("#slot-curved"))
+    $("#slot-curved").onchange = (e) => {
+      checkpoint();
+      edit.slots.find((s) => s.id === slotId).curved = e.target.checked;
+    };
   if ($("#route-template"))
     $("#route-template").onchange = (e) => {
       if (e.target.value === "Custom") return;
@@ -535,7 +656,13 @@ function bindEditor() {
     } else if (tool === "zone") s.zone = world;
     else {
       s[tool === "route" ? "path" : tool] = [world];
-      if (tool === "route" && s.id !== "QB") s.assignment = "route";
+      if (
+        tool === "route" &&
+        s.id !== "QB" &&
+        !BLOCKS.includes(s.assignment) &&
+        s.assignment !== "run"
+      )
+        s.assignment = "route";
     }
     drawBoard();
   };
@@ -575,6 +702,7 @@ act("editor-back", () => {
 });
 act("editor-undo", () => {
   if (undo.length) {
+    redo.push(clone(edit));
     edit = undo.pop();
     designer();
   }
@@ -599,6 +727,9 @@ act("save-play", async () => {
   if (i >= 0) a[i] = clone(edit);
   else a.push(clone(edit));
   await persist();
+  clearTimeout(draftTimer);
+  designerDraft = null;
+  await save("designerDraft", null);
   toast("Install saved");
   edit = null;
   undo = [];
@@ -649,7 +780,7 @@ act("test-play", () => {
   selected = p.id;
   edit = null;
   page = "game";
-  persist();
+  persist().catch(error);
   gamePage();
 });
 let viewing = false,
@@ -707,43 +838,31 @@ function scoreTeam(g, i) {
 }
 function formationFilm() {
   if (!game) return null;
-  const p = currentPlay();
+  if (game.phase === "kickoff") {
+    const f = simulateKick(game, "kickoff", hash(`${game.seed}-${game.seq}`));
+    f.frames = [{ ...f.frames[0], t: 0 }];
+    return f;
+  }
+  let p = adjusted || currentPlay();
+  if (!ownTurn() && mode !== "multiplayer") {
+    const ai = aiPlay(game);
+    if (typeof ai !== "string") p = ai;
+  }
   if (!p) return null;
-  const def = selectDefense(
-      game.defenses[1 - game.possession],
-      { receivers: p.slots.filter((s) => s.pos === "WR").length },
-      game,
-      hash(`${game.seed}-${game.seq}`) ^ 1847,
-    ),
-    off = game.teams[game.possession],
-    opp = game.teams[1 - game.possession],
-    os = lineup(off, p.slots, game.fatigue),
-    ds = lineup(opp, def.slots, game.fatigue),
-    slots = [...p.slots, ...def.slots],
-    players = [...os, ...ds].map((q, i) => ({
-      ...q,
-      athleteId: q.id,
-      id: slots[i].id,
-      side: i < 11 ? 0 : 1,
-    })),
-    qb = p.slots.find((s) => s.id === "QB");
-  return {
-    players,
-    frames: [
-      {
-        t: 0,
-        players: slots.map((s) => [s.x, s.y, 0, 0, "ready"]),
-        ball: [qb.x, qb.y, 1],
-        carrier: 10,
-      },
-    ],
-    play: p,
-    call: def,
-    ball: game.ball,
-    offense: off,
-    defense: opp,
-    events: [],
-  };
+  const call = selectDefense(
+    game.defenses[1 - game.possession],
+    { receivers: p.slots.filter((s) => s.pos === "WR").length },
+    game,
+    hash(`${game.seed}-${game.seq}`) ^ 1847,
+  );
+  return previewFilm(
+    game.teams[game.possession],
+    game.teams[1 - game.possession],
+    p,
+    call,
+    game.ball,
+    game.fatigue,
+  );
 }
 function mountStadium(canvasId, autoplay = filmAuto, start = filmTime, onEnd) {
   stadium = new Stadium($("#" + canvasId), {
@@ -758,6 +877,8 @@ function mountStadium(canvasId, autoplay = filmAuto, start = filmTime, onEnd) {
           b.textContent = snapText();
         }
       }
+      watchState = null;
+      if (page === "game") gamePage();
       onEnd?.();
     },
     onTime: (t) => {
@@ -766,16 +887,40 @@ function mountStadium(canvasId, autoplay = filmAuto, start = filmTime, onEnd) {
       if (e && !e.matches(":active")) e.value = t;
       const time = $("#film-time");
       if (time) time.textContent = t.toFixed(1) + "s";
+      const ticker = $("#live-event");
+      if (ticker && stadium?.film && viewing) {
+        const event = stadium.film.events?.filter((e) => e.t <= t).at(-1);
+        const text =
+          t < 0
+            ? "Pre-snap • Read the formation and assignments"
+            : event?.text || "Athletes executing their assignments";
+        if (ticker.textContent !== text) ticker.textContent = text;
+      }
     },
   });
   stadium.overlay = data.settings.overlays;
+  stadium.defenseArt = !!data.settings.defenseArt;
   stadium.speed = data.settings.speed || 1;
-  stadium.distance = game?.distance;
-  stadium.setFilm(film || (page === "game" ? formationFilm() : null), autoplay);
-  stadium.seek(start);
+  stadium.distance =
+    page === "film"
+      ? film?.situation?.distance
+      : viewing && watchState
+        ? watchState.distance
+        : game?.distance;
+  const displayed =
+    page === "game" && showCall && !viewing ? formationFilm() : film;
+  stadium.setFilm(displayed, displayed?.preview ? true : autoplay);
+  stadium.loopPreview = !!displayed?.preview;
+  stadium.seek(
+    displayed?.preview
+      ? displayed.frames[0].t
+      : showCall && page === "game"
+        ? 0
+        : start,
+  );
 }
 function filmToolbar() {
-  return `<div class="film-toolbar">${btn("↺", "replay", "", 'aria-label="Replay from start"')}${btn("Ⅱ / ▶", "pause", "", 'aria-label="Pause or play"')}<input id="scrub" aria-label="Replay timeline" type="range" min="0" step="0.02" max="${film?.frames.at(-1)?.t || 1}" value="${filmTime}">${btn((data.settings.speed || 1) + "×", "speed")}${btn(data.settings.overlays ? "Hide routes" : "Routes", "overlay")}${btn("Box score", "box-score")}</div>`;
+  return `<div class="film-toolbar">${btn("↺", "replay", "", 'aria-label="Replay from start"')}${btn("Ⅱ / ▶", "pause", "", 'aria-label="Pause or play"')}<input id="scrub" aria-label="Replay timeline" type="range" min="${film?.frames?.[0]?.t || 0}" step="0.02" max="${film?.frames.at(-1)?.t || 1}" value="${filmTime}">${btn((data.settings.speed || 1) + "×", "speed")}${btn(data.settings.overlays ? "Hide routes" : "Routes", "overlay")}${btn("Coverage", "defense-art")}${btn("Next call", "next-call")}${btn("Export film", "export-film")}${btn("Box score", "box-score")}${btn("Coach notes", "coach-notes")}${btn(fieldExpanded ? "Exit field view" : "Field view", "field-view")}<span class="art-legend"><i style="background:#f4cf75"></i>Route <i style="background:#f28b70"></i>Run <i style="background:#a1ddd3"></i>Block <i style="background:#b6a0f2"></i>Motion</span></div>`;
 }
 function snapText() {
   if (busy) return "Simulating…";
@@ -801,33 +946,37 @@ function gamePage() {
     );
     return;
   }
-  const own = ownTurn(),
+  const shown = viewing && watchState ? watchState : game;
+  const own =
+      viewing && watchState ? watchState.possession === human : ownTurn(),
     p = currentPlay(),
     book = availableBook(),
     opponent = game.teams[1 - human];
   shell(
-    `${head(mode === "practice" ? "Practice field" : mode === "multiplayer" ? "Friend game" : mode === "franchise" ? "Friday night / Franchise" : "Friday night / Exhibition", mode === "practice" ? "The proving ground" : `${esc(game.teams[0].school)} vs ${esc(game.teams[1].school)}`, "", btn("New game", "exhibition", "ghost small") + (mode === "multiplayer" ? btn("Friend lobby", "nav:friends", "ghost small") : ""))}<div class="game-layout"><div>${scoreHTML(game)}<div class="stadium-wrap"><canvas id="stadium" aria-label="Football field and animated replay"></canvas></div><div class="situation"><strong>${game.phase === "kickoff" ? "KICKOFF" : game.phase === "try" ? "POINT AFTER" : game.final ? "GAME COMPLETE" : `${["", "1ST", "2ND", "3RD", "4TH"][game.down]} & ${game.line === 100 ? "GOAL" : game.distance}`}</strong><small>Ball ${Math.round(game.ball)} • TO ${game.timeouts.join(" / ")} • Play clock ${game.playClock}s</small></div>${filmToolbar()}<div class="event-strip section-gap">${esc(game.last || "Pick the call. Trust your athletes.")}</div>${game.final ? `<div class="panel section-gap"><h3>${game.score[human] > game.score[1 - human] ? "A Friday night to remember." : "Back to the drawing board."}</h3><p class="muted">${esc(game.teams[game.score[0] > game.score[1] ? 0 : 1].school)} wins ${Math.max(...game.score)}–${Math.min(...game.score)}.</p>${mode === "franchise" ? btn("Complete week & advance program", "finish-week", "primary") : btn("View box score", "box-score", "primary")}</div>` : ""}</div><aside class="call-side"><div class="panel"><div class="panel-heading"><h3>${own ? "The call sheet" : "Opponent possession"}</h3><span class="badge">${mode === "practice" ? "Practice" : own ? "Your turn" : "Auto defense"}</span></div>${
-      game.phase === "kickoff"
-        ? '<p class="muted">Special teams takes the field. Kick coverage and return pursuit are simulated.</p>'
-        : game.final
-          ? '<p class="muted">Review the film and box score.</p>'
-          : !own
-            ? `<p class="muted">${esc(game.teams[game.possession].school)} calls its offense. Your defensive coordinator handles every assignment.</p>`
-            : `<div class="tabs">${["all", "pass", "run", "option"].map((k) => btn(k === "all" ? "All" : k, `call-category:${k}`, callCategory === k ? "active small" : "small")).join("")}</div><div class="call-list">${book
-                .filter(
-                  (p) =>
-                    callCategory === "all" ||
-                    p.kind === callCategory ||
-                    (callCategory === "option" &&
-                      ["triple", "rpo", "qb"].includes(p.kind)),
-                )
-                .map(
-                  (q) =>
-                    `<button class="play-card ${q.id === p?.id ? "active" : ""}" data-act="call:${q.id}">${mini(q)}<div><h4>${esc(q.name)}</h4><small>${esc(q.formation)} · ${q.kind}</small></div></button>`,
-                )
-                .join("")}</div>`
-    }<div class="spacer"></div>${btn(snapText(), "snap", "primary snap", busy || viewing || game.final || (mode === "multiplayer" && !own) ? "disabled" : "")}<div class="game-note" style="margin-top:10px">${mode === "multiplayer" ? "Your turn is committed before playback. Closing the app will not lose it." : "No athlete controls after the snap. Coach through your call sheet."}</div></div>${
-      own && !game.final && game.phase !== "kickoff"
+    `${head(mode === "practice" ? "Practice field" : mode === "multiplayer" ? "Friend game" : mode === "franchise" ? "Friday night / Franchise" : "Friday night / Exhibition", mode === "practice" ? "The proving ground" : `${esc(game.teams[0].school)} vs ${esc(game.teams[1].school)}`, "", btn("New game", "exhibition", "ghost small") + (mode === "multiplayer" ? btn("Friend lobby", "nav:friends", "ghost small") : ""))}<div class="game-layout ${fieldExpanded ? "field-expanded" : ""}"><div>${scoreHTML(viewing && watchState ? watchState : game)}<div class="stadium-wrap"><canvas id="stadium" aria-label="Football field and animated replay"></canvas></div><div class="situation"><strong>${shown.phase === "kickoff" ? "KICKOFF" : shown.phase === "try" ? "POINT AFTER" : shown.final ? "GAME COMPLETE" : `${["", "1ST", "2ND", "3RD", "4TH"][shown.down]} & ${shown.line === 100 ? "GOAL" : shown.distance}`}</strong><small>Ball ${Math.round(shown.ball)} • TO ${shown.timeouts.join(" / ")} • Play clock ${shown.playClock}s</small></div>${filmToolbar()}<div id="live-event" aria-live="polite" class="event-strip section-gap">${esc(viewing ? "Executing " + (film?.play.name || "the play") + "…" : game.last || "Pick the call. Trust your athletes.")}</div>${shown.final ? `<div class="panel section-gap"><h3>${shown.score[human] > game.score[1 - human] ? "A Friday night to remember." : "Back to the drawing board."}</h3><p class="muted">${esc(game.teams[game.score[0] > game.score[1] ? 0 : 1].school)} wins ${Math.max(...game.score)}–${Math.min(...game.score)}.</p>${mode === "franchise" ? btn("Complete week & advance program", "finish-week", "primary") : btn("View box score", "box-score", "primary")}</div>` : ""}</div><aside class="call-side"><div class="panel"><div class="panel-heading"><h3>${own ? "The call sheet" : "Opponent possession"}</h3><span class="badge">${mode === "practice" ? "Practice" : own ? "Your turn" : "Auto defense"}</span></div>${
+      viewing
+        ? `<p class="muted">Watch ${esc(film?.play.name || "the play")} develop. The next decision opens after the whistle.</p>`
+        : shown.phase === "kickoff"
+          ? `<p class="muted">Special teams takes the field. Choose a deep kickoff or a grounded onside attempt.</p>${own ? btn("Onside kick", "onside", "ghost", busy ? "disabled" : "") : ""}`
+          : game.final
+            ? '<p class="muted">Review the film and box score.</p>'
+            : !own
+              ? `<p class="muted">${esc(game.teams[game.possession].school)} calls its offense. Your defensive coordinator handles every assignment.</p>`
+              : `<div class="tabs">${["all", "pass", "run", "option"].map((k) => btn(k === "all" ? "All" : k, `call-category:${k}`, callCategory === k ? "active small" : "small")).join("")}</div><div class="call-list">${book
+                  .filter(
+                    (p) =>
+                      callCategory === "all" ||
+                      p.kind === callCategory ||
+                      (callCategory === "option" &&
+                        ["triple", "rpo", "qb"].includes(p.kind)),
+                  )
+                  .map(
+                    (q) =>
+                      `<button class="play-card ${q.id === p?.id ? "active" : ""}" data-act="call:${q.id}">${mini(q)}<div><h4>${esc(q.name)}</h4><small>${esc(q.formation)} · ${q.kind}</small></div></button>`,
+                  )
+                  .join("")}</div>`
+    }<div class="spacer"></div>${btn(snapText(), "snap", "primary snap", busy || viewing || shown.final || (mode === "multiplayer" && !own) ? "disabled" : "")}<div class="game-note" style="margin-top:10px">${mode === "multiplayer" ? "Your turn is committed before playback. Closing the app will not lose it." : "No athlete controls after the snap. Coach through your call sheet."}</div></div>${
+      own && !viewing && !game.final && game.phase !== "kickoff"
         ? `<div class="drawer form-stack">${label(
             "Tempo",
             select(
@@ -839,16 +988,23 @@ function gamePage() {
               ],
               p?.tempo || "normal",
             ),
-          )}<div class="row">${btn("Timeout", "timeout", "small")}${btn("Punt", "punt", "small")}${btn(game.phase === "try" ? "Kick PAT" : "Field goal", game.phase === "try" ? "extra_point" : "field_goal", "small")}</div>${btn("Pre-snap adjustments", "adjust", "small ghost")}<small>${game.phase === "try" && game.overtime?.round >= game.rules.otTwoFrom ? "Two-point attempt required by overtime settings." : ""}</small></div>`
+          )}<div class="row">${btn("Timeout", "timeout", "small")}${shown.phase !== "try" ? btn("Punt", "punt", "small") + btn("Punt left", "punt_left", "small ghost") + btn("Punt right", "punt_right", "small ghost") : ""}${btn(shown.phase === "try" ? "Kick PAT" : "Field goal", shown.phase === "try" ? "extra_point" : "field_goal", "small")}</div>${btn("Pre-snap adjustments", "adjust", "small ghost") + btn("Opponent scouting", "scout-game", "small ghost")}<small>${shown.phase === "try" && game.overtime?.round >= game.rules.otTwoFrom ? "Two-point attempt required by overtime settings." : ""}</small></div>`
         : ""
-    }${mode === "practice" ? `<div class="note">Practice uses the selected install against a seeded defensive call. Each snap resets the ball and down.</div>` : ""}</aside></div>`,
+    }${mode === "practice" ? `<div class="note">Practice resets the ball and down after each snap.<div class="row section-gap">${btn("Practice setup", "practice-setup", "small")}${btn("Run 20-snap study", "practice-study", "small ghost")}</div></div>` : ""}</aside></div>`,
   );
   mountStadium("stadium");
   if ($("#scrub"))
     $("#scrub").oninput = (e) => {
       stadium.playing = false;
       viewing = false;
+      watchState = null;
       stadium.seek(+e.target.value);
+      const snapButton = $('[data-act="snap"]');
+      if (snapButton) {
+        snapButton.disabled =
+          shown.final || (mode === "multiplayer" && !ownTurn());
+        snapButton.textContent = snapText();
+      }
     };
   if ($("#tempo"))
     $("#tempo").onchange = (e) => {
@@ -897,7 +1053,10 @@ act("start-exhibition", async () => {
     quarter: +$("#new-quarter").value,
   });
   game.defenses[0] = clone(data.defense);
+  game.teams[0].depth = clone(data.depthCharts[game.teams[0].id] || {});
   film = null;
+  showCall = true;
+  lastFilm = null;
   filmTime = 0;
   filmAuto = false;
   viewing = false;
@@ -911,17 +1070,32 @@ act("resume", () => {
   gamePage();
 });
 async function storeFilm(f) {
+  const fingerprint = [
+    f.version,
+    f.seed,
+    f.play.id || f.play.name,
+    f.offense.school,
+    f.defense.school,
+    f.ball,
+  ].join(":");
+  if (filmIndex.some((x) => x.fingerprint === fingerprint)) {
+    await persist();
+    return;
+  }
   const id = `film-${Date.now()}-${uid()}`;
   await save(id, f);
   filmIndex.unshift({
     id,
     title: f.play.name,
+    fingerprint,
     school: f.offense.school,
     result: f.result.reason,
     yards: f.result.yards,
     date: Date.now(),
   });
-  filmIndex = filmIndex.slice(0, 100);
+  const dropped = filmIndex.slice(1000);
+  filmIndex = filmIndex.slice(0, 1000);
+  for (const old of dropped) await remove(old.id);
   await persist();
 }
 async function snap(special) {
@@ -964,8 +1138,11 @@ async function snap(special) {
       live = committed;
       game = clone(committed.game);
     } else game = next;
+    lastFilm = f;
     film = f;
-    filmTime = 0;
+    showCall = false;
+    watchState = state;
+    filmTime = f.frames[0]?.t || 0;
     filmAuto = true;
     viewing = true;
     await storeFilm(f);
@@ -983,7 +1160,15 @@ async function snap(special) {
   }
 }
 act("snap", () => snap());
-for (const s of ["punt", "field_goal", "extra_point"]) act(s, () => snap(s));
+for (const s of [
+  "punt",
+  "punt_left",
+  "punt_right",
+  "onside",
+  "field_goal",
+  "extra_point",
+])
+  act(s, () => snap(s));
 act("timeout", async () => {
   if (busy || viewing || game.final) return;
   if (mode === "multiplayer") {
@@ -998,9 +1183,28 @@ act("timeout", async () => {
     gamePage();
   }
 });
+act("next-call", () => {
+  showCall = true;
+  filmAuto = false;
+  viewing = false;
+  gamePage();
+});
+act("defense-art", () => {
+  data.settings.defenseArt = !data.settings.defenseArt;
+  if (stadium) stadium.defenseArt = data.settings.defenseArt;
+  autoSave();
+});
 act("replay", () => {
+  if (page === "game" && lastFilm && showCall) {
+    film = lastFilm;
+    showCall = false;
+    filmTime = film.frames[0]?.t || 0;
+    filmAuto = true;
+    gamePage();
+    return;
+  }
   if (stadium && film) {
-    stadium.seek(0);
+    stadium.seek(film.frames[0]?.t || 0);
     stadium.playing = true;
   }
 });
@@ -1020,6 +1224,7 @@ act("speed", () => {
 act("overlay", () => {
   data.settings.overlays = !data.settings.overlays;
   if (stadium) stadium.overlay = data.settings.overlays;
+  stadium.defenseArt = !!data.settings.defenseArt;
   document
     .querySelectorAll('[data-act="overlay"]')
     .forEach(
@@ -1056,13 +1261,32 @@ act("apply-adjust", () => {
     return toast("Use receiver IDs from this formation");
   p.reads = reads;
   p.hot = $("#adjust-hot").value;
-  if ($("#adjust-mirror").checked)
+  if ($("#adjust-mirror").checked) {
+    p.readSide = p.readSide === "left" ? "right" : "left";
+    p.keepPath = p.keepPath?.map(([x, y]) => [-x, y]);
+    for (const r of p.rules || [])
+      if (r.side) r.side = r.side === "left" ? "right" : "left";
+    const mirrored = {
+      D0: "D3",
+      D3: "D0",
+      D1: "D2",
+      D2: "D1",
+      D4: "D6",
+      D6: "D4",
+      D7: "D8",
+      D8: "D7",
+      D9: "D10",
+      D10: "D9",
+    };
     for (const s of p.slots) {
       s.x = -s.x;
       for (const k of ["path", "motion", "shift"])
         s[k] = (s[k] || []).map(([x, y]) => [-x, y]);
+      if (mirrored[s.target]) s.target = mirrored[s.target];
     }
+  }
   const slide = $("#adjust-slide").value;
+  p.slide = slide;
   if (slide !== "none")
     for (const s of p.slots.slice(0, 5)) {
       s.assignment = "slide";
@@ -1070,14 +1294,34 @@ act("apply-adjust", () => {
       s.x += slide === "left" ? -0.2 : 0.2;
     }
   adjusted = p;
+  showCall = true;
   $("#modal").close();
+  gamePage();
   toast("Adjustment ready for the next snap");
 });
-act("box-score", () => {
-  if (!game) return;
+function boxScore(g) {
+  if (!g) return;
+  const stats = g.stats,
+    rows = stats.flatMap((s, i) =>
+      Object.entries(s.players).map(([id, v]) => ({
+        name: g.teams[i].roster.find((p) => p.id === id)?.name || id,
+        school: g.teams[i].school,
+        ...v,
+      })),
+    );
+  const table = (title, columns, filter) =>
+    `<h3 class="section-gap">${title}</h3><div class="table-scroll"><table><thead><tr><th>Athlete</th><th>School</th>${columns.map(([label]) => `<th>${label}</th>`).join("")}</tr></thead><tbody>${
+      rows
+        .filter(filter)
+        .map(
+          (p) =>
+            `<tr><td>${esc(p.name)}</td><td>${esc(p.school)}</td>${columns.map(([, key]) => `<td>${typeof key === "function" ? key(p) : p[key] || 0}</td>`).join("")}</tr>`,
+        )
+        .join("") || '<tr><td colspan="12">No recorded production.</td></tr>'
+    }</tbody></table></div>`;
   modal(
     "Friday night box score",
-    `${scoreHTML(game)}<div class="table-scroll section-gap"><table><thead><tr><th>Team</th>${game.teams.map((t) => `<th>${esc(t.school)}</th>`).join("")}</tr></thead><tbody>${[
+    `${scoreHTML(g)}<div class="table-scroll section-gap"><table><thead><tr><th>School</th><th>1</th><th>2</th><th>3</th><th>4</th><th>OT</th><th>Final</th></tr></thead><tbody>${g.teams.map((t, i) => `<tr><td>${esc(t.school)}</td>${(g.scoreLine?.[i] || [0, 0, 0, 0, 0]).map((n) => `<td>${n}</td>`).join("")}<td><strong>${g.score[i]}</strong></td></tr>`).join("")}</tbody></table></div><div class="table-scroll section-gap"><table><thead><tr><th>Team</th>${g.teams.map((t) => `<th>${esc(t.school)}</th>`).join("")}</tr></thead><tbody>${[
       ["Plays", "plays"],
       ["Total yards", "yards"],
       ["Passing", "passing"],
@@ -1086,14 +1330,63 @@ act("box-score", () => {
       ["Attempts", "attempts"],
       ["First downs", "firstDowns"],
       ["Turnovers", "turnovers"],
+      ["Third down made", "thirdMade"],
+      ["Third down attempts", "thirdAttempts"],
+      ["Penalties", "penalties"],
+      ["Penalty yards", "penaltyYards"],
     ]
       .map(
         ([name, k]) =>
-          `<tr><td>${name}</td><td>${game.stats[0][k]}</td><td>${game.stats[1][k]}</td></tr>`,
+          `<tr><td>${name}</td><td>${stats[0][k] || 0}</td><td>${stats[1][k] || 0}</td></tr>`,
       )
-      .join(
-        "",
-      )}</tbody></table></div><h3 class="section-gap">Athlete production</h3><div class="table-scroll"><table><thead><tr><th>Athlete</th><th>Touches</th><th>Yards</th><th>TD</th></tr></thead><tbody>${game.stats.flatMap((s, i) => Object.entries(s.players).map(([id, v]) => `<tr><td>${esc(game.teams[i].roster.find((p) => p.id === id)?.name || id)}</td><td>${v.passAttempts ? `${v.passCompletions}/${v.passAttempts} pass` : v.touches}</td><td>${v.passAttempts ? v.passYards : v.yards}</td><td>${v.td}</td></tr>`)).join("")}</tbody></table></div><h3 class="section-gap">Drive log</h3><div class="film-events">${game.history
+      .join("")}</tbody></table></div>${table(
+      "Passing",
+      [
+        ["C/A", (p) => `${p.passCompletions || 0}/${p.passAttempts || 0}`],
+        ["YDS", "passYards"],
+        ["TD", "passTD"],
+        ["INT", "interceptions"],
+      ],
+      (p) => p.passAttempts,
+    )}${table(
+      "Rushing",
+      [
+        ["CAR", "carries"],
+        ["YDS", "rushYards"],
+        ["TD", "td"],
+        ["LONG", "longest"],
+      ],
+      (p) => p.carries,
+    )}${table(
+      "Receiving",
+      [
+        ["REC", "receptions"],
+        ["YDS", "receivingYards"],
+        ["YAC", "yac"],
+        ["TD", "td"],
+      ],
+      (p) => p.receptions,
+    )}${table(
+      "Defense & trenches",
+      [
+        ["TKL", "tackles"],
+        ["SACK", "sacks"],
+        ["INT", "defInts"],
+        ["FF", "forcedFumbles"],
+        ["BLK", "blocks"],
+      ],
+      (p) => p.tackles || p.sacks || p.defInts || p.blocks,
+    )}${table(
+      "Special teams",
+      [
+        ["FG", (p) => `${p.fieldGoals || 0}/${p.fgAttempts || 0}`],
+        ["PAT", (p) => `${p.pats || 0}/${p.patAttempts || 0}`],
+        ["PUNTS", "punts"],
+      ],
+      (p) => p.fgAttempts || p.patAttempts || p.punts,
+    )}<h3 class="section-gap">Possession summaries</h3><div class="film-events">${(g.drives || []).map((d) => `<div class="list-row"><div><strong>${esc(g.teams[d.team].school)}</strong><br><small>${d.plays} plays · ${d.yards} yards · From own ${Math.round(d.from)}</small></div><small>${esc(d.result || "Drive in progress")}</small></div>`).join("") || '<p class="muted">No offensive possession yet.</p>'}</div><h3 class="section-gap">Play log</h3><div class="film-events">${(
+      g.history || []
+    )
       .slice()
       .reverse()
       .map(
@@ -1102,7 +1395,8 @@ act("box-score", () => {
       )
       .join("")}</div>`,
   );
-});
+}
+act("box-score", () => boxScore(game));
 function franchisePage() {
   const f = data.franchise;
   if (!f) {
@@ -1152,9 +1446,13 @@ function franchisePage() {
       .reverse()
       .map(
         (r) =>
-          `<div class="list-row"><small>${r.year} / Week ${r.week + 1}<br>${esc(f.teams[r.opponent].school)}</small><strong>${r.score.join(" – ")}</strong></div>`,
+          `<div class="list-row" role="button" tabindex="0" data-act="record:${f.records.indexOf(r)}"><small>${r.year} / Week ${r.week + 1}<br>${esc(f.teams[r.opponent].school)}</small><strong>${r.score.join(" – ")}</strong></div>`,
       )
       .join("")}</section></div>`,
+  );
+  $(".main").insertAdjacentHTML(
+    "beforeend",
+    `<div class="panel section-gap"><div class="panel-heading"><h3>The program desk</h3><span class="badge">Season & career</span></div><div class="row">${btn("District leaders", "season-leaders", "small")}${btn("Career records", "career-records", "small")}${btn("Depth chart", "program-depth", "small")}${m ? btn("Scout next opponent", "scout-next", "small ghost") : ""}${btn("Alumni", "alumni", "small ghost")}</div></div>`,
   );
   $("#training").onchange = (e) => {
     f.training = e.target.value;
@@ -1238,6 +1536,8 @@ act("play-franchise", async () => {
   game.franchiseWeek = f.week;
   game.defenses[human] = clone(data.defense);
   film = null;
+  showCall = true;
+  lastFilm = null;
   filmTime = 0;
   filmAuto = false;
   viewing = false;
@@ -1346,6 +1646,10 @@ function rosterPage() {
         : ""
     }</div><div class="panel section-gap"><div class="table-scroll"><table><thead><tr><th>#</th><th>Athlete</th><th>Pos</th><th>Class</th><th>HT / WT</th><th>SPD</th><th>STR</th><th>AWR</th><th>Scout</th></tr></thead><tbody>${t.roster.map((p) => `<tr><td>${p.number}</td><td><strong>${esc(p.name)}</strong></td><td>${p.pos}</td><td>${["", "", "", "", "", "", "", "", "", "FR", "SO", "JR", "SR"][p.grade] || p.grade}</td><td>${Math.floor(p.height / 12)}′${p.height % 12}″ / ${p.weight}</td><td>${p.ratings.speed}</td><td>${p.ratings.strength}</td><td>${p.ratings.awareness}</td><td>${btn("View", `athlete:${p.id}`, "small ghost")}</td></tr>`).join("")}</tbody></table></div></div>`,
   );
+  $(".page-head .actions").insertAdjacentHTML(
+    "beforeend",
+    btn("Depth chart", "roster-depth", "ghost small"),
+  );
   if ($("#roster-team"))
     $("#roster-team").onchange = (e) => {
       rosterTeam = +e.target.value;
@@ -1365,13 +1669,15 @@ function athlete(id) {
     p = t.roster.find((p) => p.id === id);
   modal(
     `#${p.number} ${esc(p.name)}`,
-    `<p class="muted">${p.pos} • Grade ${p.grade} • ${p.height} in / ${p.weight} lb</p>${rosterProgram ? `${label("Athlete name", input("ath-name", p.name))}<div class="form-row section-gap">${label("Jersey number", input("ath-number", p.number, "number", 'min="0" max="99"'))}${label("Position", select("ath-pos", ["QB", "RB", "WR", "TE", "C", "G", "T", "DE", "DT", "LB", "CB", "S", "K", "P"], p.pos))}</div>` : ""}<div class="grid cols2 section-gap">${ATTR.map((a) => (rosterProgram ? label(a.replace(/([A-Z])/g, " $1"), input("rating-" + a, p.ratings[a], "number", 'min="20" max="99"')) : `<div class="list-row"><small>${a.replace(/([A-Z])/g, " $1")}</small><strong>${p.ratings[a]}</strong></div>`)).join("")}</div>${rosterProgram ? `<div class="spacer"></div>${btn("Save athlete", "save-athlete", "primary")}` : '<p class="note section-gap">Official competitive ratings are fixed. Franchise ratings can be edited freely.</p>'}`,
+    `<p class="muted">${p.pos} • Grade ${p.grade} • ${p.height} in / ${p.weight} lb</p>${rosterProgram ? `${label("Athlete name", input("ath-name", p.name))}<div class="form-row section-gap">${label("Jersey number", input("ath-number", p.number, "number", 'min="0" max="99"'))}${label("Position", select("ath-pos", ["QB", "RB", "WR", "TE", "C", "G", "T", "DE", "DT", "LB", "CB", "S", "K", "P"], p.pos))}</div>` : ""}<div class="grid cols2 section-gap">${ATTR.map((a) => (rosterProgram ? label(a.replace(/([A-Z])/g, " $1"), input("rating-" + a, p.ratings[a], "number", 'min="20" max="99"')) : `<div class="list-row"><small>${a.replace(/([A-Z])/g, " $1")}</small><strong>${p.ratings[a]}</strong></div>`)).join("")}</div>${rosterProgram ? `${label("Individual development", select("ath-training", ["balanced", "speed", "strength", "skills"], data.franchise.trainingPlans?.[p.id] || "balanced"))}<div class="spacer"></div>${btn("Save athlete", "save-athlete", "primary")}` : '<p class="note section-gap">Official competitive ratings are fixed. Franchise ratings can be edited freely.</p>'}`,
     () => {
       if (rosterProgram)
         actions["save-athlete"] = async () => {
           p.name = $("#ath-name").value.trim() || p.name;
           p.number = clamp(+$("#ath-number").value, 0, 99);
           p.pos = $("#ath-pos").value;
+          data.franchise.trainingPlans ||= {};
+          data.franchise.trainingPlans[p.id] = $("#ath-training").value;
           for (const a of ATTR)
             p.ratings[a] = clamp(+$("#rating-" + a).value, 20, 99);
           await persist();
@@ -1383,7 +1689,7 @@ function athlete(id) {
 }
 function filmPage() {
   shell(
-    `${head("Study the details", "Film room", "A good coach watches the result. A great coach studies the read.")}<div class="game-layout"><div><div class="stadium-wrap" style="border-radius:12px 12px 0 0;border-top:1px solid var(--line)"><canvas id="film-canvas" aria-label="Football replay"></canvas></div>${filmToolbar()}<section class="panel section-gap"><div class="panel-heading"><h3>${esc(film?.play.name || "Your film library")}</h3><span class="badge" id="film-time">${filmTime.toFixed(1)}s</span></div>${film ? `<p class="muted">${esc(film.offense.school)} vs ${esc(film.defense.school)} • ${esc(film.call.name)} • Seed ${film.seed}</p><div class="film-events">${film.events.map((e, i) => `<div class="film-event" data-act="event:${i}" tabindex="0" role="button"><time>${e.t.toFixed(1)}s</time><span>${esc(e.text)}</span></div>`).join("")}</div>` : '<div class="empty">Run a play on gameday or in practice to start your film library.</div>'}</section></div><aside class="panel"><h3>Saved snaps</h3><div class="film-events section-gap">${filmIndex.map((f, i) => `<button class="play-card ${i === filmPick ? "active" : ""}" style="width:100%;margin-bottom:8px;text-align:left" data-act="film:${i}"><div><h4>${esc(f.title)}</h4><small>${esc(f.school)} • ${esc(f.result)} • ${Math.round(f.yards)} yd</small></div></button>`).join("") || '<p class="muted">No saved film yet.</p>'}</div></aside></div>`,
+    `${head("Study the details", "Film room", "A good coach watches the result. A great coach studies the read.")}<div class="game-layout ${fieldExpanded ? "field-expanded" : ""}"><div><div class="stadium-wrap" style="border-radius:12px 12px 0 0;border-top:1px solid var(--line)"><canvas id="film-canvas" aria-label="Football replay"></canvas></div>${filmToolbar()}<section class="panel section-gap"><div class="panel-heading"><h3>${esc(film?.play.name || "Your film library")}</h3><span class="badge" id="film-time">${filmTime.toFixed(1)}s</span></div>${film ? `<p class="muted">${esc(film.offense.school)} vs ${esc(film.defense.school)} • ${esc(film.call.name)} • Seed ${film.seed}</p><div class="film-events">${film.events.map((e, i) => `<div class="film-event" data-act="event:${i}" tabindex="0" role="button"><time>${e.t.toFixed(1)}s</time><span>${esc(e.text)}</span></div>`).join("")}</div>` : '<div class="empty">Run a play on gameday or in practice to start your film library.</div>'}</section></div><aside class="panel"><h3>Saved snaps</h3><div class="film-events section-gap">${filmIndex.map((f, i) => `<button class="play-card ${i === filmPick ? "active" : ""}" style="width:100%;margin-bottom:8px;text-align:left" data-act="film:${i}"><div><h4>${esc(f.title)}</h4><small>${esc(f.school)} • ${esc(f.result)} • ${Math.round(f.yards)} yd</small></div></button>`).join("") || '<p class="muted">No saved film yet.</p>'}</div></aside></div>`,
   );
   mountStadium("film-canvas", false, filmTime);
   $("#scrub").oninput = (e) => {
@@ -1404,7 +1710,7 @@ function friendsPage() {
               TEAMS.map((t) => [t.id, t.school]),
               data.team,
             ),
-          )}${label("Coach display name", input("coach-name", user.displayName || user.email?.split("@")[0] || "Coach"))}<div class="row">${btn("Create friend game", "create-match", "primary")}${btn("Join with code", "join-dialog", "ghost")}</div><p class="note">Your current offensive and defensive playbooks are copied into the match. Defensive calls stay locked for that game.</p><div class="row">${btn("Cloud backup", "cloud-save", "small")}${btn("Restore cloud backup", "cloud-load", "small")}${btn("Sign out", "logout", "small ghost")}</div></div></section>`
+          )}${label("Coach display name", input("coach-name", user.displayName || user.email?.split("@")[0] || "Coach"))}<div class="row">${btn("Create friend game", "create-match", "primary")}${btn("Join with code", "join-dialog", "ghost")}</div><p class="note">Your current offensive and defensive playbooks are copied into the match. Defensive calls stay locked for that game.</p><div class="row">${btn("Cloud backup", "cloud-save", "small")}${btn("Restore cloud backup", "cloud-load", "small")}${btn("Sign out", "logout", "small ghost")}${btn("Pending turn", "pending-turn", "small ghost")}</div></div></section>`
     }<section class="panel"><h3>Your games</h3>${matchesError ? `<p class="error">${esc(matchesError)}</p>` : ""}${!user ? '<p class="muted">Sign in to see your friend games.</p>' : matches.length ? matches.map((m) => `<div class="list-row"><div><strong>${esc(m.game.teams[0].school)} / ${esc(m.game.teams[1].school)}</strong><br><small>${m.status === "waiting" ? "Invite code: " + m.code : m.status === "complete" ? "FINAL " + m.game.score.join(" – ") : m.turn === user.uid ? "● YOUR OFFENSIVE TURN" : "Friend on offense"}</small></div>${btn(m.status === "waiting" ? "Open lobby" : "Open", `match:${m.code}`, "small")}</div>`).join("") : '<p class="muted">No games yet. Create a matchup and share its join code.</p>'}${user ? btn("Private league leaderboard", "leaderboard", "ghost small") : ""}</section></div>`,
   );
 }
@@ -1417,6 +1723,7 @@ async function ensureCloud() {
     cloudStatus = u ? "Cloud connected" : "Local saves ready";
     if (u) {
       cloud.recover().catch(error);
+      initializeCloudProfile().catch(error);
       refreshMatches().catch(error);
     }
     if (page === "friends" || page === "settings") render();
@@ -1454,6 +1761,8 @@ act("reset-password", async () => {
   }
 });
 act("logout", async () => {
+  clearTimeout(cloudSaveTimer);
+  cloudReady = false;
   await cloud.logout();
   matches = [];
   live = null;
@@ -1466,9 +1775,11 @@ async function refreshMatches() {
     matches = await cloud.listMatches();
     matchesError = "";
     if (page === "friends") friendsPage();
+    else if (page === "home") home();
   } catch (e) {
     matchesError = e.message;
     if (page === "friends") friendsPage();
+    else if (page === "home") home();
   }
 }
 act("refresh-matches", refreshMatches);
@@ -1484,6 +1795,7 @@ act("create-match", async () => {
       crypto.getRandomValues(new Uint32Array(1))[0],
     );
     g.defenses[0] = clone(data.defense);
+    g.teams[0].depth = clone(data.depthCharts[team] || {});
     const code = await cloud.createMatch(g, data.book, name);
     busy = false;
     await openMatch(code);
@@ -1513,7 +1825,10 @@ act("confirm-join", async () => {
   try {
     const code = await cloud.joinMatch(
       $("#join-code").value,
-      TEAMS[+$("#join-team").value],
+      {
+        ...clone(TEAMS[+$("#join-team").value]),
+        depth: clone(data.depthCharts[+$("#join-team").value] || {}),
+      },
       data.book,
       data.defense,
       $("#join-name").value,
@@ -1530,6 +1845,8 @@ async function openMatch(code) {
   unwatch?.();
   mode = "multiplayer";
   film = null;
+  showCall = true;
+  lastFilm = null;
   filmTime = 0;
   filmAuto = false;
   viewing = false;
@@ -1598,8 +1915,12 @@ act("leaderboard", async () => {
 act("cloud-save", async () => {
   try {
     await persist();
-    await cloud.cloudSave(data);
-    toast("Cloud backup saved");
+    cloudRevision = await cloud.cloudSave(data);
+    cloudReady = true;
+    data.cloudOwner = user.uid;
+    data.cloudRevision = cloudRevision;
+    await save("profile", data);
+    toast("Cloud profile saved");
   } catch (e) {
     error(e);
   }
@@ -1614,6 +1935,21 @@ act("cloud-load", async () => {
       () => {
         actions["confirm-cloud-load"] = async () => {
           data = { ...d, filmIds: filmIndex };
+          data.books ||= [
+            {
+              id: "varsity",
+              name: "Varsity playbook",
+              plays: clone(data.book),
+            },
+          ];
+          data.activeBook ||= "varsity";
+          data.depthCharts ||= {};
+          data.settings.autoCloud ??= true;
+          data.cloudOwner = user.uid;
+          const env = await cloud.cloudEnvelope();
+          cloudRevision = env?.revision || 0;
+          data.cloudRevision = cloudRevision;
+          cloudReady = true;
           game = data.game;
           mode = data.mode || "exhibition";
           human = data.human || 0;
@@ -1630,8 +1966,12 @@ act("cloud-load", async () => {
 });
 function settingsPage() {
   shell(
-    `${head("Make it yours", "Settings & saves", "Your playbooks and franchise save on this device. Keep a backup for switching phones or browsers.")}<div class="grid cols2"><section class="panel form-stack"><h3>Save management</h3><p class="muted">An installed app and another browser can have separate device storage. Use the same signed-in account and cloud backup to move your program between them.</p><div class="row">${btn("Export full backup", "export-save", "primary")}<label>Restore backup<input id="import-save" type="file" accept=".json,application/json"></label></div><div class="row">${user ? btn("Cloud backup", "cloud-save") + btn("Restore cloud", "cloud-load") : btn("Sign in for cloud saves", "nav:friends")}</div><span class="save-state">Saved on this device</span><h3 class="section-gap">Playback</h3>${label("Assignment overlays", `<input id="setting-overlay" type="checkbox" ${data.settings.overlays ? "checked" : ""}>`, "inline")}<p class="note">Live friend turns require a connection. If a submission disconnects, reopen the app and sign in; the pending transaction is retried with the same sequence.</p></section><section class="panel"><h3>Coach’s field guide</h3><div class="list-row"><strong>Play designer</strong><small>Align → assign → route → reads → save</small></div><div class="list-row"><strong>Motion & shifts</strong><small>Draw pre-snap paths in the board tools</small></div><div class="list-row"><strong>Film</strong><small>Pause, scrub, and tap a decision event</small></div><div class="list-row"><strong>Franchise</strong><small>Ten weeks, semifinals, championship</small></div><p class="note">NFHS-style default: 12-minute quarters, 40/25 play clock, tries at the 3, kickoffs at the 40, paired overtime possessions at the opponent’s 10. This engine is an approximation; see IMPLEMENTATION.md for the implemented rules and remaining limitations.</p><p><a href="README.md" target="_blank" rel="noopener">Deployment guide ↗</a> · <a href="IMPLEMENTATION.md" target="_blank" rel="noopener">Implementation details ↗</a></p><small>Fresh source • ${VERSION}</small></section></div>`,
+    `${head("Make it yours", "Settings & saves", "Your playbooks and franchise save on this device. Keep a backup for switching phones or browsers.")}<div class="grid cols2"><section class="panel form-stack"><h3>Save management</h3>${label("Automatically save my signed-in profile", `<input id="auto-cloud" type="checkbox" ${data.settings.autoCloud ? "checked" : ""}>`, "inline")}<small id="cloud-save-state">${esc(cloudSaveState)}</small><p class="muted">An installed app and another browser can have separate device storage. Use the same signed-in account and cloud backup to move your program between them.</p><div class="row">${btn("Export full backup", "export-save", "primary")}<label>Restore backup<input id="import-save" type="file" accept=".json,application/json"></label></div><div class="row">${user ? btn("Cloud backup", "cloud-save") + btn("Restore cloud", "cloud-load") : btn("Sign in for cloud saves", "nav:friends")}</div><span class="save-state">Saved on this device</span><h3 class="section-gap">Playback</h3>${label("Assignment overlays", `<input id="setting-overlay" type="checkbox" ${data.settings.overlays ? "checked" : ""}>`, "inline")}<p class="note">Live friend turns require a connection. If a submission disconnects, reopen the app and sign in; the pending transaction is retried with the same sequence.</p></section><section class="panel"><h3>Coach’s field guide</h3><div class="list-row"><strong>Play designer</strong><small>Align → assign → route → reads → save</small></div><div class="list-row"><strong>Motion & shifts</strong><small>Draw pre-snap paths in the board tools</small></div><div class="list-row"><strong>Film</strong><small>Pause, scrub, and tap a decision event</small></div><div class="list-row"><strong>Franchise</strong><small>Ten weeks, semifinals, championship</small></div><p class="note">NFHS-style default: 12-minute quarters, 40/25 play clock, tries at the 3, kickoffs at the 40, paired overtime possessions at the opponent’s 10. This engine is an approximation; see IMPLEMENTATION.md for the implemented rules and remaining limitations.</p><p><a href="README.md" target="_blank" rel="noopener">Deployment guide ↗</a> · <a href="IMPLEMENTATION.md" target="_blank" rel="noopener">Implementation details ↗</a></p><small>Fresh source • ${VERSION}</small></section></div>`,
   );
+  $("#auto-cloud").onchange = (e) => {
+    data.settings.autoCloud = e.target.checked;
+    autoSave();
+  };
   $("#setting-overlay").onchange = (e) => {
     data.settings.overlays = e.target.checked;
     autoSave();
@@ -1640,7 +1980,7 @@ function settingsPage() {
     try {
       const d = JSON.parse(await e.target.files[0].text());
       if (
-        d.version !== VERSION ||
+        ![VERSION, "hsf-1.0.0"].includes(d.version) ||
         !Array.isArray(d.book) ||
         !Array.isArray(d.defense) ||
         d.book.some((p) => p.slots?.length !== 11)
@@ -1651,6 +1991,9 @@ function settingsPage() {
       mode = d.mode || "exhibition";
       human = d.human || 0;
       data.filmIds = filmIndex;
+      const active = data.books?.find((b) => b.id === data.activeBook);
+      if (active) active.plays = clone(data.book);
+      data.updatedAt = Date.now();
       await persist();
       render();
       toast("Backup restored");
@@ -1705,6 +2048,44 @@ document.addEventListener("click", async (e) => {
       a.splice(i, 1);
       await persist();
       render();
+    } else if (type === "remove-point") {
+      readPoints();
+      edit.slots.find((s) => s.id === slotId).path.splice(+id, 1);
+      pathPoints();
+    } else if (type === "record") {
+      const f = data.franchise,
+        r = f.records[+id],
+        away = r.home === f.team ? r.opponent : f.team;
+      boxScore({
+        teams: [
+          {
+            ...f.teams[r.home],
+            roster: r.athletes?.[0] || f.teams[r.home].roster,
+          },
+          { ...f.teams[away], roster: r.athletes?.[1] || f.teams[away].roster },
+        ],
+        score: r.score,
+        stats: r.stats,
+        drives: r.drives,
+        scoreLine: r.scoreLine?.length ? r.scoreLine : undefined,
+        history: [],
+        final: true,
+        possession: 0,
+      });
+    } else if (type === "built-formation") {
+      checkpoint();
+      edit = applyFormation(edit, id);
+      $("#modal").close();
+      designer();
+    } else if (type === "front") {
+      checkpoint();
+      edit = defensiveTemplate(edit, id);
+      $("#modal").close();
+      designer();
+    } else if (type === "remove-rule") {
+      readLogic();
+      edit.rules.splice(+id, 1);
+      logicEditor();
     } else if (type === "slot") {
       slotId = id;
       designer();
@@ -1727,6 +2108,7 @@ document.addEventListener("click", async (e) => {
     } else if (type === "call") {
       selected = id;
       adjusted = null;
+      showCall = true;
       film = null;
       filmTime = 0;
       filmAuto = false;
@@ -1752,14 +2134,24 @@ document.addEventListener("keydown", (e) => {
 });
 window.addEventListener("online", () => {
   cloudStatus = "Connection restored";
-  if (user) cloud.recover().catch(error);
+  if (user) {
+    cloud.recover().catch(error);
+    initializeCloudProfile().then(queueCloudSave).catch(error);
+  }
 });
 window.addEventListener("offline", () => {
   cloudStatus = "Offline • local modes ready";
   toast("Offline. Friend turns will wait for a connection.");
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) persist();
+  if (document.hidden) {
+    persist().catch(error);
+    if (edit) {
+      clearTimeout(draftTimer);
+      designerDraft = { play: clone(edit), defense: editDef, slot: slotId };
+      save("designerDraft", designerDraft).catch(error);
+    }
+  }
 });
 // Restore local context independently of an active friend match.
 mode = data.mode || "exhibition";
@@ -1772,4 +2164,455 @@ if (navigator.onLine)
     matchesError = e.message;
   });
 if ("serviceWorker" in navigator)
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
+  navigator.serviceWorker
+    .register("./sw.js")
+    .then((reg) => {
+      const notice = () =>
+        toast(
+          "Update ready. Close all HS Football windows and reopen to install it.",
+        );
+      if (reg.waiting) notice();
+      reg.addEventListener("updatefound", () =>
+        reg.installing?.addEventListener("statechange", () => {
+          if (reg.waiting && navigator.serviceWorker.controller) notice();
+        }),
+      );
+    })
+    .catch(() => {});
+// Install tools preserve the approved field and expose the existing simulation settings.
+act("formation-library", () =>
+  modal(
+    "Formation library",
+    `<div class="grid cols2">${FORMATIONS.map((name) => btn(esc(name), `built-formation:${name}`, "ghost")).join("")}</div><p class="note section-gap">Routes move with each athlete. Check receiver eligibility after changing personnel or alignment.</p>`,
+  ),
+);
+act("defense-templates", () =>
+  modal(
+    "Defensive front",
+    `<div class="grid cols2">${["4–3", "3–4", "5–2", "4–4"].map((name) => btn(name, `front:${name}`, "ghost")).join("")}</div>`,
+  ),
+);
+function logicEditor() {
+  edit.rules ||= [];
+  modal(
+    "Quarterback conditional logic",
+    `<p class="muted">Rules evaluate live defender positions, movement and receiver separation. Awareness and intelligence affect recognition. Earlier rules have priority.</p><div class="form-stack">${edit.rules
+      .map(
+        (r, i) =>
+          `<div class="panel"><div class="row between"><h4>Rule ${i + 1}</h4>${btn("Remove", `remove-rule:${i}`, "small danger")}</div><div class="grid cols2 section-gap">${label("When", select(`logic-when-${i}`, Object.entries(CONDITIONS), r.when))}${label("Then", select(`logic-action-${i}`, Object.entries(LOGIC_ACTIONS), r.action))}${label("Receiver", select(`logic-target-${i}`, ["X", "Y", "Z", "H", "RB"], r.target))}${label(
+            "Read defender",
+            select(
+              `logic-defender-${i}`,
+              Array.from({ length: 11 }, (_, i) => `D${i}`),
+              r.defender,
+            ),
+          )}${label("Threshold (yards / seconds / count)", input(`logic-threshold-${i}`, r.threshold, "number", 'min="0.5" max="10" step="0.5"'))}${label("Overload side", select(`logic-side-${i}`, ["left", "right"], r.side))}</div></div>`,
+      )
+      .join(
+        "",
+      )}<div class="row">${btn("+ Add rule", "add-rule", "ghost")}${btn("Apply logic", "apply-logic", "primary")}</div></div>`,
+  );
+}
+function readLogic() {
+  (edit.rules || []).forEach((r, i) => {
+    for (const k of [
+      "when",
+      "action",
+      "target",
+      "defender",
+      "threshold",
+      "side",
+    ]) {
+      const el = $(`#logic-${k}-${i}`);
+      if (el) r[k] = k === "threshold" ? +el.value : el.value;
+    }
+  });
+}
+act("logic-editor", () => {
+  checkpoint();
+  logicEditor();
+});
+act("add-rule", () => {
+  readLogic();
+  if (edit.rules.length >= 12)
+    return toast("Twelve conditional rules per play");
+  edit.rules.push({
+    id: uid(),
+    when: "blitz",
+    action: "hot",
+    target: "H",
+    defender: "D3",
+    threshold: 2,
+    side: "right",
+  });
+  logicEditor();
+});
+act("apply-logic", () => {
+  readLogic();
+  $("#modal").close();
+  toast("Conditional logic applied to this install");
+});
+act("new-book", () =>
+  modal(
+    "New playbook",
+    `<div class="form-stack">${label("Book name", input("book-name", "New playbook"))}${label(
+      "Starting point",
+      select(
+        "book-base",
+        [
+          ["current", "Copy active book"],
+          ["defaults", "Default installs"],
+        ],
+        "current",
+      ),
+    )}${btn("Create book", "create-book", "primary")}</div>`,
+  ),
+);
+act("create-book", async () => {
+  const name = $("#book-name").value.trim();
+  if (!name) return;
+  const plays =
+      $("#book-base").value === "current" ? clone(data.book) : defaults(),
+    id = uid();
+  data.books.push({ id, name, plays });
+  data.activeBook = id;
+  data.book = plays;
+  await persist();
+  $("#modal").close();
+  playbook();
+});
+act("rename-book", () =>
+  modal(
+    "Rename playbook",
+    `${label("Name", input("rename-book-name", data.books.find((b) => b.id === data.activeBook)?.name))}<div class="spacer"></div>${btn("Save name", "save-book-name", "primary")}`,
+  ),
+);
+act("save-book-name", async () => {
+  const b = data.books.find((b) => b.id === data.activeBook);
+  b.name = $("#rename-book-name").value.trim() || b.name;
+  await persist();
+  $("#modal").close();
+  playbook();
+});
+function scoutModal(t) {
+  const report = scout(t);
+  modal(
+    t.school + " scouting report",
+    `<div class="team-card">${crest(t)}<div><h3>${esc(t.scheme)}</h3><small>${esc(t.description)}</small></div></div><div class="stat-grid section-gap">${Object.entries(
+      report.ratings,
+    )
+      .map(
+        ([k, v]) =>
+          `<div><div class="big-num">${v}</div><small>${k.toUpperCase()}</small></div>`,
+      )
+      .join(
+        "",
+      )}</div><div class="section-gap">${report.tips.map((t) => `<p class="note">${t}</p>`).join("")}</div>`,
+  );
+}
+act("scout-game", () => scoutModal(game.teams[1 - game.possession]));
+act("scout-next", () => {
+  const f = data.franchise,
+    m = matchup(f);
+  if (m) scoutModal(f.teams[m.home === f.team ? m.away : m.home]);
+});
+function depthChart(program = false) {
+  const t = program
+      ? data.franchise.teams[data.franchise.team]
+      : TEAMS[rosterTeam],
+    chart = program ? (t.depth ||= {}) : (data.depthCharts[t.id] ||= {}),
+    slots = [
+      ...baseSlots().map((s) => ({ ...s, unit: "offense" })),
+      ...defenseDefaults()[0].slots.map((s) => ({ ...s, unit: "defense" })),
+    ];
+  modal(
+    t.school + " depth chart",
+    `<p class="muted">Choose starters or leave Auto. Fatigued starters rotate to available reserves. The same athlete may start on both units.</p><div class="form-stack">${slots.map((s) => label(s.unit.toUpperCase() + " / " + s.id + " · " + s.pos, select("depth-" + s.id, [["", "Auto • best available"], ...t.roster.map((p) => [p.id, `#${p.number} ${p.name} (${p.pos})`])], chart[s.unit]?.[s.id] || ""))).join("")}${btn("Save depth chart", "save-depth", "primary")}</div>`,
+    () => {
+      actions["save-depth"] = async () => {
+        const next = { offense: {}, defense: {} };
+        for (const s of slots) next[s.unit][s.id] = $("#depth-" + s.id).value;
+        for (const unit of ["offense", "defense"]) {
+          const ids = Object.values(next[unit]).filter(Boolean);
+          if (new Set(ids).size !== ids.length)
+            return toast("Each athlete can fill one starting slot per unit");
+        }
+        if (program) t.depth = next;
+        else data.depthCharts[t.id] = next;
+        await persist();
+        $("#modal").close();
+        toast("Depth chart saved");
+      };
+    },
+  );
+}
+act("program-depth", () => depthChart(true));
+act("roster-depth", () => depthChart(rosterProgram));
+function leadersModal(career = false) {
+  const f = data.franchise,
+    stats = career ? f.careerStats : f.seasonStats;
+  const rows = leaders(f.teams, stats, leaderCategory);
+  modal(
+    career ? "Career records" : "District season leaders",
+    `${select(
+      "leader-category",
+      [
+        ["passYards", "Passing yards"],
+        ["rushYards", "Rushing yards"],
+        ["receivingYards", "Receiving yards"],
+        ["td", "Touchdowns"],
+        ["tackles", "Tackles"],
+        ["sacks", "Sacks"],
+        ["defInts", "Interceptions"],
+        ["blocks", "Blocks"],
+      ],
+      leaderCategory,
+    )}<div class="table-scroll section-gap"><table><thead><tr><th>Athlete</th><th>School</th><th>Total</th></tr></thead><tbody>${rows.map((p) => `<tr><td>#${p.number} ${esc(p.name)}</td><td>${esc(p.school)}</td><td>${p.total}</td></tr>`).join("") || '<tr><td colspan="3">No recorded production in this category yet.</td></tr>'}</tbody></table></div>`,
+    () => {
+      $("#leader-category").onchange = (e) => {
+        leaderCategory = e.target.value;
+        leadersModal(career);
+      };
+    },
+  );
+}
+let leaderCategory = "passYards";
+act("season-leaders", () => leadersModal());
+act("career-records", () => leadersModal(true));
+act("alumni", () => {
+  const f = data.franchise;
+  modal(
+    "Program alumni",
+    `<div class="table-scroll"><table><thead><tr><th>Class</th><th>Athlete</th><th>School</th><th>Career yards</th></tr></thead><tbody>${
+      (f.graduation || [])
+        .filter((p) => p.school === f.teams[f.team].school)
+        .slice()
+        .reverse()
+        .map(
+          (p) =>
+            `<tr><td>${p.year}</td><td>${esc(p.name)}</td><td>${esc(p.school)}</td><td>${p.career?.yards || 0}</td></tr>`,
+        )
+        .join("") ||
+      '<tr><td colspan="4">Your first senior class has not graduated yet.</td></tr>'
+    }</tbody></table></div>`,
+  );
+});
+
+function queueCloudSave() {
+  clearTimeout(cloudSaveTimer);
+  if (!user || !cloudReady || !data.settings.autoCloud) return;
+  cloudSaveState = "Cloud save queued";
+  cloudSaveTimer = setTimeout(flushCloudProfile, 1800);
+}
+async function initializeCloudProfile() {
+  if (!user) return;
+  const env = await cloud.cloudEnvelope();
+  if (!env) {
+    cloudRevision = 0;
+    cloudReady = true;
+    data.cloudOwner = user.uid;
+    queueCloudSave();
+    return;
+  }
+  if (
+    (!localProfileExists && !data.updatedAt) ||
+    (data.cloudOwner === user.uid && data.cloudRevision === env.revision)
+  ) {
+    cloudRevision = env.revision;
+    cloudReady = true;
+    if (!localProfileExists && !data.updatedAt) {
+      data = { ...env.data, filmIds: filmIndex };
+      data.cloudOwner = user.uid;
+      data.cloudRevision = env.revision;
+      game = data.game;
+      data.books ||= [
+        { id: "varsity", name: "Varsity playbook", plays: clone(data.book) },
+      ];
+      data.activeBook ||= "varsity";
+      data.depthCharts ||= {};
+      await save("profile", data);
+      if (page !== "game") render();
+    }
+    return;
+  }
+  cloudReady = false;
+  cloudSaveState =
+    "Cloud copy available — use Restore cloud backup before automatic syncing";
+  if (page === "settings" || page === "friends") render();
+}
+async function flushCloudProfile() {
+  if (cloudSaving || !cloudReady || !user || !navigator.onLine) return;
+  cloudSaving = true;
+  const owner = user.uid,
+    snapshot = clone(data);
+  try {
+    const revision = await cloud.cloudSave(snapshot, cloudRevision);
+    if (user?.uid === owner) {
+      cloudRevision = revision;
+      data.cloudRevision = revision;
+      data.cloudOwner = owner;
+      await save("profile", data);
+      cloudSaveState = "Cloud saved";
+      if (data.updatedAt !== snapshot.updatedAt) queueCloudSave();
+    }
+  } catch (e) {
+    cloudSaveState = e.message;
+    cloudReady = false;
+    toast("Cloud profile not overwritten: " + e.message);
+  } finally {
+    cloudSaving = false;
+    const el = $("#cloud-save-state");
+    if (el) el.textContent = cloudSaveState;
+  }
+}
+act("pending-turn", async () => {
+  const p = await cloud.pendingTurn();
+  modal(
+    "Pending offensive turn",
+    p
+      ? `<p>A snap for game ${esc(p.code)} at sequence ${p.expectedSeq + 1} is waiting for confirmation. Retry uses the same turn, seed, and replay.</p><div class="row">${btn("Retry submission", "retry-pending", "primary")}${btn("Discard local attempt", "discard-pending", "danger")}</div>`
+      : "<p>No unconfirmed offensive turn.</p>",
+  );
+});
+act("retry-pending", async () => {
+  await cloud.recover();
+  $("#modal").close();
+  await refreshMatches();
+  toast("Turn recovered");
+});
+act("discard-pending", async () => {
+  await cloud.discardPending();
+  $("#modal").close();
+  toast("Local attempt discarded. Saved server turns remain intact.");
+});
+
+act("practice-setup", () =>
+  modal(
+    "Practice situation",
+    `<div class="form-stack">${label(
+      "Opponent",
+      select(
+        "practice-opponent",
+        TEAMS.map((t) => [t.id, t.school]),
+        game.teams[1].id,
+      ),
+    )}${label("Defensive install", select("practice-defense", [["auto", "Automatic coordinator"], ...data.defense.map((d) => [d.id, d.name])], game.practiceCall?.id || "auto"))}<div class="form-row">${label("Ball (own yard line)", input("practice-ball", game.ball, "number", 'min="1" max="99"'))}${label("Down", select("practice-down", [1, 2, 3, 4], game.down))}${label("Yards to gain", input("practice-distance", game.distance, "number", 'min="1" max="30"'))}${label("Seed", input("practice-seed", game.seed, "number", 'min="1"'))}</div>${btn("Set situation", "save-practice", "primary")}</div>`,
+  ),
+);
+act("save-practice", async () => {
+  game.teams[1] = clone(TEAMS[+$("#practice-opponent").value]);
+  game.practiceCall = data.defense.find(
+    (d) => d.id === $("#practice-defense").value,
+  )
+    ? clone(data.defense.find((d) => d.id === $("#practice-defense").value))
+    : null;
+  game.ball = clamp(+$("#practice-ball").value, 1, 99);
+  game.down = +$("#practice-down").value;
+  game.distance = Math.min(
+    clamp(+$("#practice-distance").value, 1, 30),
+    100 - game.ball,
+  );
+  game.line = game.ball + game.distance;
+  game.seed = +$("#practice-seed").value >>> 0;
+  film = null;
+  showCall = true;
+  await persist();
+  $("#modal").close();
+  gamePage();
+});
+act("practice-study", async () => {
+  if (busy) return;
+  busy = true;
+  toast("Running twenty independent snaps in the practice worker…");
+  try {
+    const runs = await compute({
+      type: "lab",
+      game,
+      play: clone(adjusted || currentPlay()),
+      count: 20,
+      seed: hash(`${game.seed}-${game.seq}`),
+    });
+    const valid = runs.filter((r) => !r.result.penalty),
+      avg =
+        valid.reduce((s, r) => s + r.result.yards, 0) /
+        Math.max(1, valid.length),
+      comps = valid.filter((r) => r.result.complete).length,
+      ints = valid.filter((r) => r.result.intercepted).length,
+      sacks = valid.filter((r) => r.result.reason === "sack").length;
+    modal(
+      "Practice study · " + esc(currentPlay().name),
+      `<p class="muted">Twenty independent simulated snaps from this exact situation. No team-fit multipliers. Results are observations, not guaranteed predictions.</p><div class="stat-grid"><div><div class="big-num">${avg.toFixed(1)}</div><small>Mean yards</small></div><div><div class="big-num">${comps}</div><small>Completions</small></div><div><div class="big-num">${ints}</div><small>Interceptions</small></div><div><div class="big-num">${sacks}</div><small>Sacks</small></div></div><div class="film-events section-gap">${runs.map((r, i) => `<div class="list-row"><small>SNAP ${i + 1}</small><span>${esc(r.result.penalty?.name || r.result.reason)} · ${Math.round(r.result.yards)} yd</span></div>`).join("")}</div>`,
+    );
+  } catch (e) {
+    error(e);
+  } finally {
+    busy = false;
+  }
+});
+act("editor-redo", () => {
+  if (!redo.length) return;
+  undo.push(clone(edit));
+  edit = redo.pop();
+  designer();
+});
+function pathPoints() {
+  const s = edit.slots.find((s) => s.id === slotId);
+  modal(
+    s.id + " path points",
+    `<p class="muted">Coordinates are field yards, measured from the ball. Positive depth goes toward the opponent’s end zone.</p><div class="form-stack">${(s.path || []).map(([x, y], i) => `<div class="row"><strong>${i + 1}</strong><div style="flex:1">${label("Lateral", input("path-x-" + i, x, "number", 'step="0.5" min="-26" max="26"'))}</div><div style="flex:1">${label("Depth", input("path-y-" + i, y, "number", 'step="0.5" min="-20" max="90"'))}</div>${btn("✕", `remove-point:${i}`, "small danger")}</div>`).join("")}<div class="row">${btn("+ Break point", "add-point", "ghost")}${btn("Apply path", "apply-points", "primary")}</div></div>`,
+  );
+}
+function readPoints() {
+  const s = edit.slots.find((s) => s.id === slotId);
+  s.path = (s.path || []).map((p, i) => [
+    clamp(+$("#path-x-" + i).value, -26, 26),
+    clamp(+$("#path-y-" + i).value, -20, 90),
+  ]);
+}
+act("path-points", () => {
+  checkpoint();
+  pathPoints();
+});
+act("add-point", () => {
+  readPoints();
+  const s = edit.slots.find((s) => s.id === slotId),
+    last = s.path?.at(-1) || [s.x, s.y];
+  s.path ||= [];
+  s.path.push([last[0], last[1] + 5]);
+  pathPoints();
+});
+act("apply-points", () => {
+  readPoints();
+  $("#modal").close();
+  designer();
+});
+
+act("export-film", () => {
+  if (!film) return toast("Select a completed snap first");
+  download("HS-Football-Film-" + film.seed + ".json", film);
+});
+
+act("coach-notes", () => {
+  if (!film?.result) return toast("Run a play to review its decisions");
+  if (viewing) return toast("Coach notes open after the whistle");
+  modal(
+    "Coach’s film review",
+    `<p class="muted">${esc(film.play.name)} • ${esc(film.call.name)}</p><div class="form-stack">${analyzeFilm(
+      film,
+    )
+      .map(
+        (n) =>
+          `<section class="note"><strong>${esc(n.title)}</strong><p>${esc(n.detail)}</p></section>`,
+      )
+      .join("")}</div>`,
+  );
+});
+act("field-view", () => {
+  const wrap = document.querySelector(".game-layout");
+  if (!wrap) return;
+  const expanded = wrap.classList.toggle("field-expanded");
+  fieldExpanded = expanded;
+  const button = document.querySelector('[data-act="field-view"]');
+  if (button) button.textContent = expanded ? "Exit field view" : "Field view";
+  stadium?.resize();
+});

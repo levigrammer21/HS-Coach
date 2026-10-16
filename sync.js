@@ -1,4 +1,4 @@
-import { VERSION, clone } from "./data.js";
+import { VERSION, clone, separateAwayRoster } from "./data.js";
 export function turnPlan(match, uid, expectedSeq, nextGame) {
   if (match.version !== VERSION) throw Error("Simulation version mismatch");
   if (match.seq !== expectedSeq)
@@ -28,7 +28,8 @@ export function joinPlan(match, uid, team, book, defense, name) {
     throw Error("This game already has two coaches");
   m.members.push(uid);
   m.names.push(name);
-  m.game.teams[1] = clone(team);
+  m.game.teams[1] =
+    team.id === m.game.teams[0].id ? separateAwayRoster(team) : clone(team);
   m.game.defenses[1] = clone(defense);
   m.books.push(clone(book));
   m.status = "active";

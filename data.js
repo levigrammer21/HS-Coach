@@ -1,4 +1,4 @@
-export const VERSION = "hsf-1.0.0";
+export const VERSION = "hsf-1.2.0";
 export const clone = (x) => JSON.parse(JSON.stringify(x));
 export const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 export function rng(seed) {
@@ -346,6 +346,16 @@ export const TEAMS = specs.map((s, i) => ({
   description: s[5],
   roster: makeRoster(i),
 }));
+// Identical official schools still represent independent athletes in a match.
+export function separateAwayRoster(team) {
+  const copy = clone(team);
+  copy.roster = copy.roster.map((p) => ({
+    ...p,
+    sourceId: p.sourceId || p.id,
+    id: (p.sourceId || p.id) + "@away",
+  }));
+  return copy;
+}
 export const SLOT = [
   "LT",
   "LG",
@@ -409,7 +419,7 @@ export const ROUTES = {
   Go: [[0, 25]],
   Slant: [
     [0, 4],
-    [8, 12],
+    [-8, 12],
   ],
   Out: [
     [0, 9],
@@ -445,7 +455,7 @@ export const ROUTES = {
   ],
   Drag: [
     [0, 3],
-    [18, 3],
+    [-25, 3],
   ],
   Seam: [[0, 20]],
 };
@@ -491,7 +501,15 @@ export function defaults() {
       (j, k) => (p.slots[j].path = routeFor(p.slots[j], routes[k])),
     );
     if (concept === "Quick") p.release = 0.9;
-    if (concept === "Play Action") p.release = 2.2;
+    if (concept === "Screen") {
+      p.reads = ["H", "RB", "X"];
+      p.release = 0.7;
+      p.drop = 3;
+    }
+    if (concept === "Play Action") {
+      p.release = 2.2;
+      p.fake = true;
+    }
     a.push(p);
   }
   for (const [name, kind, blocks, path] of [
@@ -651,6 +669,139 @@ export function defaults() {
       p.reads = ["X"];
       p.release = 0.9;
     }
+    if (["Power Right", "Counter Left", "Trap", "Dive"].includes(name)) {
+      p.formation = "I Formation";
+      p.slots[10].y = -1;
+      p.drop = 1;
+      p.slots[9].x = 0;
+      p.slots[9].y = -7;
+      p.slots[8].x = 0;
+      p.slots[8].y = -3;
+      p.slots[8].pos = "RB";
+      p.slots[8].assignment = "lead";
+      p.slots[8].target = "D4";
+      p.slots[8].path = [
+        [2, -1],
+        [3, 3],
+      ];
+      const set = (i, assignment, target, path = []) =>
+        Object.assign(p.slots[i], { assignment, target, path });
+      set(0, "man", "D0");
+      set(2, "man", "D1");
+      set(3, "man", "D2");
+      set(4, "double", "D2");
+      set(6, "lead", "D3", [[5, 1]]);
+      if (name === "Power Right") {
+        p.slots[9].path = [
+          [4, 1],
+          [4, 20],
+        ];
+        set(1, "pull", "D6", [
+          [0, -2],
+          [4, -2],
+          [4, 4],
+        ]);
+      } else if (name === "Counter Left") {
+        p.slots[9].path = [
+          [3, -1],
+          [-4, 0],
+          [-5, 6],
+          [-7, 20],
+        ];
+        set(1, "double", "D1");
+        set(2, "man", "D2");
+        set(3, "pull", "D4", [
+          [0, -2],
+          [-4, -2],
+          [-4, 4],
+        ]);
+        set(4, "pull", "D4", [
+          [1, -3],
+          [-6, -2],
+          [-6, 3],
+        ]);
+        set(6, "pass", "D3");
+        p.slots[8].target = "D0";
+        p.slots[8].path = [
+          [-4, -1],
+          [-5, 1],
+        ];
+      } else {
+        p.slots[9].path =
+          name === "Dive"
+            ? [
+                [0, 1],
+                [0, 20],
+              ]
+            : [
+                [1, 1],
+                [1, 20],
+              ];
+        set(1, "man", "D1");
+        set(2, "double", "D1");
+        set(4, "man", "D3");
+        set(6, "lead", "D6", [[4, 2]]);
+      }
+    }
+    if (kind === "option") {
+      p.readSide = "right";
+      p.keepPath = [
+        [7, -1],
+        [11, 3],
+        [15, 25],
+      ];
+    }
+    if (kind === "triple") {
+      p.formation = "Flexbone";
+      p.mesh = 0.4;
+      p.runner = "H";
+      p.readSide = "right";
+      p.drop = 1;
+      p.keepPath = [
+        [5, -1],
+        [9, 2],
+        [14, 25],
+      ];
+      Object.assign(p.slots[10], { x: 0, y: -1 });
+      Object.assign(p.slots[6], {
+        x: 20,
+        y: 0,
+        pos: "WR",
+        assignment: "route",
+        path: [[20, 15]],
+      });
+      Object.assign(p.slots[7], {
+        x: -5,
+        y: -1.5,
+        assignment: "lead",
+        target: "D4",
+        path: [[-5, 2]],
+      });
+      Object.assign(p.slots[8], {
+        x: 0,
+        y: -4,
+        pos: "RB",
+        assignment: "run",
+        path: [
+          [0, 1],
+          [0, 20],
+        ],
+      });
+      Object.assign(p.slots[9], {
+        x: 5,
+        y: -3,
+        assignment: "run",
+        path: [
+          [10, 1],
+          [16, 25],
+        ],
+      });
+    }
+    if (name === "Toss Right") {
+      p.exchange = "toss";
+      p.mesh = 0.8;
+    }
+    if (name === "Bubble Screen") p.reads = ["H", "RB", "X"];
     a.push(p);
   }
   a.push({ ...play("kneel", "Victory Kneel", "Clock", "kneel"), release: 0.7 });
@@ -663,45 +814,63 @@ export function defenseDefaults() {
     name,
     weight: [40, 30, 20, 10][i],
     situation: "any",
-    slots: Array.from({ length: 11 }, (_, j) => ({
-      id: `D${j}`,
-      x: [-5, -1.7, 1.7, 5, -5, 0, 5, -20, 20, -9, 9][j],
-      y: [1, 1, 1, 1, 5, 5, 5, 4, 4, 14, 14][j],
-      pos: ["DE", "DT", "DT", "DE", "LB", "LB", "LB", "CB", "CB", "S", "S"][j],
-      assignment:
-        j < 4 || (i === 3 && j < 7)
-          ? "rush"
-          : i === 2
-            ? "man"
-            : i === 0
-              ? j >= 9 || j === 7
-                ? "deep"
-                : "zone"
-              : i === 1
-                ? j >= 9
-                  ? "deep"
-                  : "zone"
-                : "man",
-      target: ["X", "Y", "Z", "H", "RB"][Math.max(0, j - 4) % 5],
-      zone: [
-        [-5, 0],
-        [-2, 0],
-        [2, 0],
-        [5, 0],
-        [-12, 7],
-        [0, 8],
-        [12, 7],
-        [-20, 16],
-        [20, 16],
-        [-9, 24],
-        [9, 24],
-      ][j],
-      stunt: 0,
-      contain: j === 0 || j === 3,
-    })),
+    slots: Array.from({ length: 11 }, (_, j) => {
+      let assignment = j < 4 ? "rush" : "zone",
+        target = ["RB", "H", "Y", "X", "Z", "H", "Y"][j - 4] || "X",
+        zone = [
+          [-5, 0],
+          [-2, 0],
+          [2, 0],
+          [5, 0],
+          [-10, 7],
+          [0, 8],
+          [10, 7],
+          [-20, 5],
+          [20, 5],
+          [-10, 23],
+          [10, 23],
+        ][j];
+      if (i === 0 && [7, 8, 10].includes(j)) {
+        assignment = "deep";
+        zone = j === 7 ? [-20, 24] : j === 8 ? [20, 24] : [0, 27];
+      }
+      if (i === 0) {
+        if (j === 4) zone = [-8, 8];
+        if (j === 5) zone = [8, 8];
+        if (j === 6) zone = [20, 5];
+        if (j === 9) zone = [-20, 5];
+      }
+      if (i === 1 && j >= 9) assignment = "deep";
+      if (i === 2) {
+        assignment =
+          j < 4 ? "rush" : j === 10 ? "deep" : j === 9 ? "zone" : "man";
+        if (j === 10) zone = [0, 26];
+        if (j === 9) zone = [0, 8];
+      }
+      if (i === 3) assignment = j < 7 ? "rush" : "man";
+      return {
+        id: `D${j}`,
+        x: [-5, -1.7, 1.7, 5, -5, 0, 5, -20, 20, -9, 9][j],
+        y: i === 0 && j === 9 ? 7 : [1, 1, 1, 1, 5, 5, 5, 4, 4, 14, 14][j],
+        pos: ["DE", "DT", "DT", "DE", "LB", "LB", "LB", "CB", "CB", "S", "S"][
+          j
+        ],
+        assignment,
+        target,
+        zone,
+        stunt: 0,
+        fit: "auto",
+        contain: j === 0 || j === 3,
+      };
+    }),
   }));
 }
-export function validateFormation(p) {
+export function validateFormation(input) {
+  const p = clone(input);
+  p.slots = p.slots.map((s) => {
+    const end = s.motion?.at(-1) || s.shift?.at(-1);
+    return end ? { ...s, x: end[0], y: end[1] } : s;
+  });
   const issues = [],
     line = p.slots.filter((s) => Math.abs(s.y) < 0.4).sort((a, b) => a.x - b.x),
     back = p.slots.filter((s) => s.y < -0.4);
@@ -727,7 +896,14 @@ export function validateFormation(p) {
     if (s.motion?.length && s.y >= -0.4)
       issues.push(`${s.id} must shift into the backfield before motion.`);
     const m = s.motion;
-    if (m?.length > 1 && m.at(-1)[1] > m.at(-2)[1])
+    const prior =
+      m?.length > 1
+        ? m.at(-2)
+        : s.shift?.at(-1) || [
+            input.slots.find((q) => q.id === s.id).x,
+            input.slots.find((q) => q.id === s.id).y,
+          ];
+    if (m?.length && m.at(-1)[1] > prior[1])
       issues.push("Motion cannot be toward the goal line at the snap.");
   }
   return [...new Set(issues)];
@@ -772,28 +948,55 @@ export function selectDefense(book, visible, state, seed) {
   return book[weighted.findIndex((w) => (v -= w) < 0)] || book.at(-1);
 }
 export function lineup(team, slots, fatigue = {}) {
-  const used = new Set();
-  return slots.map((s) => {
-    const candidates = team.roster.filter((p) => !used.has(p.id));
-    candidates.sort((a, b) => {
-      const score = (p) =>
-        (p.pos === s.pos
-          ? 100
-          : ["WR", "TE"].includes(s.pos) && ["WR", "TE"].includes(p.pos)
-            ? 75
-            : 0) +
-        Object.values(p.ratings).reduce((a, b) => a + b, 0) / ATTR.length -
-        (fatigue[p.id] || 0) * 35;
-      return score(b) - score(a);
+  const used = new Set(),
+    result = [],
+    aliases = new Map(team.roster.map((p) => [p.sourceId || p.id, p.id])),
+    preferred = (s) => {
+      const raw =
+        s.athlete ||
+        team.depth?.[s.id.startsWith("D") ? "defense" : "offense"]?.[s.id];
+      return aliases.get(raw) || raw;
+    },
+    reserved = new Set(slots.map(preferred).filter(Boolean));
+  const order = slots
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => {
+      const priority = (s) =>
+        preferred(s)
+          ? -1
+          : s.id === "QB"
+            ? 0
+            : s.id === "RB"
+              ? 1
+              : s.id === "H" && s.pos === "RB"
+                ? 4
+                : 2;
+      return priority(a.s) - priority(b.s);
     });
-    const preferred = candidates.find((p) => p.id === s.athlete);
-    const p =
-      preferred && (fatigue[preferred.id] || 0) < 0.8
-        ? preferred
-        : candidates[0];
+  for (const { s, i } of order) {
+    let candidates = team.roster.filter(
+      (p) => !used.has(p.id) && (p.id === preferred(s) || !reserved.has(p.id)),
+    );
+    if (!candidates.length)
+      candidates = team.roster.filter((p) => !used.has(p.id));
+    const score = (p) =>
+      (p.pos === s.pos
+        ? 100
+        : ["WR", "TE"].includes(s.pos) && ["WR", "TE"].includes(p.pos)
+          ? 75
+          : 0) +
+      Object.values(p.ratings).reduce((a, b) => a + b, 0) / ATTR.length -
+      (fatigue[p.id] || 0) * 35;
+    candidates.sort((a, b) => score(b) - score(a));
+    const chosen = candidates.find((p) => p.id === preferred(s)),
+      p =
+        chosen && (fatigue[chosen.id] || 0) < (team.subAt || 0.7)
+          ? chosen
+          : candidates[0];
     used.add(p.id);
-    return clone(p);
-  });
+    result[i] = clone(p);
+  }
+  return result;
 }
 export function teamFit(team, book) {
   const passing = book.filter((p) => ["pass", "rpo"].includes(p.kind)),
